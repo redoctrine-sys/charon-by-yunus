@@ -129,15 +129,30 @@ export function strictJsonFromText(text) {
   }
 }
 
-/** Best-effort repair for JSON truncated mid-generation. */
+/** Best-effort repair for JSON truncated mid-generation.
+ *  Handles: unterminated strings, trailing commas, unclosed brackets/braces. */
 function repairTruncatedJson(raw) {
   let s = String(raw).trimEnd();
-  // Remove trailing comma before closing
-  s = s.replace(/,\s*$/, '');
-  // Count unclosed braces and brackets
-  const stack = [];
+
+  // ── Pass 1: detect if we ended inside a string ────────────────────────────
   let inString = false;
   let escape = false;
+  for (const ch of s) {
+    if (escape) { escape = false; continue; }
+    if (ch === '\\' && inString) { escape = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+  }
+  // If the string is still open, close it
+  if (inString) s += '"';
+
+  // ── Pass 2: remove trailing comma before a close delimiter ────────────────
+  s = s.replace(/,\s*([}\]])/g, '$1');  // {"a":1,}  → {"a":1}
+  s = s.replace(/,\s*$/, '');           // trailing comma at end
+
+  // ── Pass 3: close unclosed braces/brackets ───────────────────────────────
+  const stack = [];
+  inString = false;
+  escape = false;
   for (const ch of s) {
     if (escape) { escape = false; continue; }
     if (ch === '\\' && inString) { escape = true; continue; }
@@ -147,7 +162,8 @@ function repairTruncatedJson(raw) {
     else if (ch === '[') stack.push(']');
     else if (ch === '}' || ch === ']') stack.pop();
   }
-  // Close all unclosed structures in reverse order
+  // Remove trailing comma again after all repairs, then close structures
+  s = s.replace(/,\s*$/, '');
   return s + stack.reverse().join('');
 }
 

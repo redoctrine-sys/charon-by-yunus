@@ -178,18 +178,9 @@ function buildBatchMessages(rows, triggerCandidateId) {
   ].join(' ');
 
   const user = {
-    task: 'Pick the best dry-run buy candidate from this recent batch, or choose none.',
+    task: 'Pick the best buy candidate, or PASS. Keep reason under 15 words.',
     recent_lessons: activeLessonsForPrompt(),
-    output_schema: {
-      verdict: 'BUY|WATCH|PASS',
-      selected_candidate_id: 'integer candidate_id when verdict is BUY, otherwise null',
-      selected_mint: 'mint string when verdict is BUY, otherwise null',
-      confidence: 'number 0-100',
-      reason: 'short string',
-      risks: ['short strings'],
-      suggested_tp_percent: 'positive number',
-      suggested_sl_percent: 'negative number',
-    },
+    output_example: '{"verdict":"BUY","selected_candidate_id":12,"selected_mint":"mint...","confidence":72,"reason":"strong vol surge, early entry","risks":"rug risk","suggested_tp_percent":60,"suggested_sl_percent":-25}',
     trigger_candidate_id: triggerCandidateId,
     candidates: rows.map(compactCandidateForLlm),
   };
