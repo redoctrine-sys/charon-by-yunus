@@ -114,7 +114,41 @@ export function strictJsonFromText(text) {
   const clean = stripThinking(text);
   const fenced = clean.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
   const raw = fenced || clean.match(/\{[\s\S]*\}/)?.[0] || clean;
-  return JSON.parse(raw);
+  try {
+    return JSON.parse(raw);
+  } catch (firstErr) {
+    // Attempt to repair truncated JSON by closing unclosed brackets/braces.
+    // This happens when LLM output is cut off mid-stream (max_tokens too low, etc.).
+    try {
+      const repaired = repairTruncatedJson(raw);
+      return JSON.parse(repaired);
+    } catch {
+      // Re-throw the original error with useful context
+      throw new SyntaxError(`${firstErr.message} — raw snippet: ${String(raw).slice(0, 120)}`);
+    }
+  }
+}
+
+/** Best-effort repair for JSON truncated mid-generation. */
+function repairTruncatedJson(raw) {
+  let s = String(raw).trimEnd();
+  // Remove trailing comma before closing
+  s = s.replace(/,\s*$/, '');
+  // Count unclosed braces and brackets
+  const stack = [];
+  let inString = false;
+  let escape = false;
+  for (const ch of s) {
+    if (escape) { escape = false; continue; }
+    if (ch === '\\' && inString) { escape = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === '{') stack.push('}');
+    else if (ch === '[') stack.push(']');
+    else if (ch === '}' || ch === ']') stack.pop();
+  }
+  // Close all unclosed structures in reverse order
+  return s + stack.reverse().join('');
 }
 
 export function parseNumericInput(value) {

@@ -67,7 +67,7 @@ async function callTier(messages, tier) {
       model,
       messages,
       temperature: 0.2,
-      max_tokens: Number(process.env.LLM_MAX_TOKENS || 500),
+      max_tokens: Number(process.env.LLM_MAX_TOKENS || 1500),
     },
     {
       timeout: LLM_TIMEOUT_MS,
