@@ -39,12 +39,14 @@ function checkBudget() {
   return BUDGET.windowCost < BUDGET.LIMIT_USD;
 }
 
-/** Rough per-call cost heuristic based on token count. */
+/** Rough per-call cost heuristic based on token count.
+ *  MiMO Standard plan: 200M credits/month. Assuming $30/month → $0.00000015/token.
+ *  We use a 5x safety buffer over the estimate so the budget guard trips earlier than billing. */
 function estimateCost(model, totalTokens) {
   const rates = {
-    'mimo-v2.5': 0.000001,
-    'mimo-v2.5-pro': 0.000005,
-    'mimo-v2-omni': 0.000008,
+    'mimo-v2.5':     0.0000003,
+    'mimo-v2.5-pro': 0.0000008,
+    'mimo-v2-omni':  0.0000015,
   };
   return totalTokens * (rates[model] ?? 0.000001);
 }
@@ -129,7 +131,37 @@ function extractConfidence(rawResponse) {
 }
 
 // ---------------------------------------------------------------------------
-// Build the shared system + user messages (mirrors llm.js prompt logic)
+// Build a LIGHTWEIGHT screen-only prompt — asks only for verdict + confidence
+// This keeps the output small enough to fit in LLM_SCREEN_MAX_TOKENS.
+// ---------------------------------------------------------------------------
+function buildScreenMessages(rows) {
+  const system = [
+    'You are a Solana token screener.',
+    'Return ONLY a single-line JSON object with three fields: verdict (BUY|WATCH|PASS), confidence (0-100), and reason (short string).',
+    'Do NOT include any other fields.',
+    'Be concise.',
+  ].join(' ');
+
+  const user = {
+    task: 'Quickly screen these Solana meme coin candidates. Pick the single most promising one or return PASS.',
+    candidates: rows.map(r => ({
+      id: r.id,
+      mint: r.candidate?.token?.mint,
+      mcap: r.candidate?.token?.market_cap,
+      volume_24h: r.candidate?.token?.volume_24h,
+      price_change_24h: r.candidate?.token?.price_change_24h,
+      strategy: r.candidate?.strategy,
+    })),
+  };
+
+  return [
+    { role: 'system', content: system },
+    { role: 'user', content: JSON.stringify(user) },
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// Build the full system + user messages for tier-2/3 analysis
 // ---------------------------------------------------------------------------
 function buildBatchMessages(rows, triggerCandidateId) {
   const system = [
@@ -245,33 +277,37 @@ export async function decideCandidateBatchRouted(rows, triggerCandidateId) {
   const analyzeThreshold = Number(process.env.LLM_ANALYZE_CONFIDENCE_THRESHOLD || 60);
 
   try {
-    // ── Tier 1: screen — use a small token budget (only needs confidence)
-    // For tier 1, we use 800 tokens max since we only read the confidence field.
-    // The full analysis is done in tier 2 if escalation is needed.
-    const screenMaxTokens = Number(process.env.LLM_SCREEN_MAX_TOKENS || 800);
-    const t1Raw = await callTier(messages, 'screen', screenMaxTokens);
+    // ── Tier 1: screen — lightweight prompt, small token budget
+    const screenMaxTokens = Number(process.env.LLM_SCREEN_MAX_TOKENS || 300);
+    const screenMessages = buildScreenMessages(rows);
+    const t1Raw = await callTier(screenMessages, 'screen', screenMaxTokens);
     const t1Confidence = extractConfidence(t1Raw);
     console.log(`[llmRouter] tier=screen model=${t1Raw._model} confidence=${t1Confidence} budget=$${BUDGET.windowCost.toFixed(4)}`);
 
     if (t1Confidence >= screenThreshold) {
-      return parseBatchResponse(t1Raw, rows);
+      // Tier 1 was confident enough — now fetch the full analysis from tier 1
+      // before returning, so we have reason/risks/tp/sl fields.
+      const fullMessages = buildBatchMessages(rows, triggerCandidateId);
+      const t1FullRaw = await callTier(fullMessages, 'screen');
+      return parseBatchResponse(t1FullRaw, rows);
     }
 
-    // ── Tier 2: analyze — use full token budget
+    // ── Tier 2: analyze — full prompt, full token budget
     if (!checkBudget()) {
       console.log('[llmRouter] budget exhausted before tier 2 escalation, using tier 1 result.');
       return parseBatchResponse(t1Raw, rows);
     }
 
     console.log(`[llmRouter] escalating to tier=analyze (screen confidence ${t1Confidence} < ${screenThreshold})`);
-    const t2Raw = await callTier(messages, 'analyze');
+    const fullMessages = buildBatchMessages(rows, triggerCandidateId);
+    const t2Raw = await callTier(fullMessages, 'analyze');
     const t2Confidence = extractConfidence(t2Raw);
     console.log(`[llmRouter] tier=analyze model=${t2Raw._model} confidence=${t2Confidence} budget=$${BUDGET.windowCost.toFixed(4)}`);
 
     // Optional Tier 3 escalation — only if env var LLM_TIER_FINAL is explicitly set
     if (t2Confidence < analyzeThreshold && process.env.LLM_TIER_FINAL && checkBudget()) {
       console.log(`[llmRouter] escalating to tier=final (analyze confidence ${t2Confidence} < ${analyzeThreshold})`);
-      const t3Raw = await callTier(messages, 'final');
+      const t3Raw = await callTier(fullMessages, 'final');
       console.log(`[llmRouter] tier=final model=${t3Raw._model} budget=$${BUDGET.windowCost.toFixed(4)}`);
       return parseBatchResponse(t3Raw, rows);
     }
