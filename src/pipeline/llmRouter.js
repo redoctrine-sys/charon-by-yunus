@@ -135,22 +135,24 @@ function extractConfidence(rawResponse) {
 // This keeps the output small enough to fit in LLM_SCREEN_MAX_TOKENS.
 // ---------------------------------------------------------------------------
 function buildScreenMessages(rows) {
+  // Send only the top 5 candidates by strategy signal to minimize input tokens
+  const top5 = rows.slice(0, 5);
+
   const system = [
     'You are a Solana token screener.',
-    'Return ONLY a single-line JSON object with three fields: verdict (BUY|WATCH|PASS), confidence (0-100), and reason (short string).',
-    'Do NOT include any other fields.',
-    'Be concise.',
+    'Output ONLY a raw single-line JSON. No markdown, no code fences, no explanation, no thinking.',
+    'Format: {"verdict":"BUY|WATCH|PASS","confidence":0-100,"reason":"<10 words"}',
+    'Do NOT output anything else.',
   ].join(' ');
 
   const user = {
-    task: 'Quickly screen these Solana meme coin candidates. Pick the single most promising one or return PASS.',
-    candidates: rows.map(r => ({
+    t: 'Screen these tokens. Output one JSON line only.',
+    c: top5.map(r => ({
       id: r.id,
-      mint: r.candidate?.token?.mint,
-      mcap: r.candidate?.token?.market_cap,
-      volume_24h: r.candidate?.token?.volume_24h,
-      price_change_24h: r.candidate?.token?.price_change_24h,
-      strategy: r.candidate?.strategy,
+      mc: r.candidate?.token?.market_cap,
+      v: r.candidate?.token?.volume_24h,
+      p: r.candidate?.token?.price_change_24h,
+      s: r.candidate?.strategy,
     })),
   };
 
@@ -164,17 +166,17 @@ function buildScreenMessages(rows) {
 // Build the full system + user messages for tier-2/3 analysis
 // ---------------------------------------------------------------------------
 function buildBatchMessages(rows, triggerCandidateId) {
+  // Limit to 5 candidates to keep input tokens manageable for MiMO's context window
+  const top = rows.slice(0, 5);
+
   const system = [
     'You are Charon, a Solana meme coin trench analyst.',
-    'Return strict JSON only.',
-    'You will receive up to 10 recently matched candidates.',
-    'Pick at most one candidate to buy through the configured execution mode.',
+    'Output ONLY a single-line JSON with no explanation, no markdown, no code fences.',
+    'Pick at most one candidate to buy.',
     'Use verdict BUY only for the single best unusually strong asymmetric opportunity.',
-    'Use WATCH if candidates are interesting but none deserves a buy.',
-    'Use PASS if the set is weak or unsafe.',
-    'Chart data is ATH/range context. Do not penalize or reward a token only because 24h change is huge; new Pump tokens often do that.',
-    'Use distance from ATH/range high and top-blast risk to decide whether entry is late.',
-    'Confidence is your conviction from 0 to 100, not probability.',
+    'Use WATCH if interesting but none deserves a buy. Use PASS if weak or unsafe.',
+    'Chart data is ATH/range context.',
+    'Confidence is your conviction 0-100.',
   ].join(' ');
 
   const user = {
@@ -182,7 +184,7 @@ function buildBatchMessages(rows, triggerCandidateId) {
     recent_lessons: activeLessonsForPrompt(),
     output_example: '{"verdict":"BUY","selected_candidate_id":12,"selected_mint":"mint...","confidence":72,"reason":"strong vol surge, early entry","risks":"rug risk","suggested_tp_percent":60,"suggested_sl_percent":-25}',
     trigger_candidate_id: triggerCandidateId,
-    candidates: rows.map(compactCandidateForLlm),
+    candidates: top.map(compactCandidateForLlm),
   };
 
   return [
@@ -269,7 +271,7 @@ export async function decideCandidateBatchRouted(rows, triggerCandidateId) {
 
   try {
     // ── Tier 1: screen — lightweight prompt, small token budget
-    const screenMaxTokens = Number(process.env.LLM_SCREEN_MAX_TOKENS || 300);
+    const screenMaxTokens = Number(process.env.LLM_SCREEN_MAX_TOKENS || 500);
     const screenMessages = buildScreenMessages(rows);
     const t1Raw = await callTier(screenMessages, 'screen', screenMaxTokens);
     const t1Confidence = extractConfidence(t1Raw);
