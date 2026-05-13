@@ -12,9 +12,9 @@ import { stripThinking, strictJsonFromText, safeJson } from '../utils.js';
 // Tier model names — read from env, fall back to safe defaults
 // ---------------------------------------------------------------------------
 const MODELS = {
-  screen: process.env.LLM_TIER_SCREEN || process.env.LLM_MODEL || 'deepseek-v4-flash',
-  analyze: process.env.LLM_TIER_ANALYZE || process.env.LLM_MODEL || 'deepseek-v4-pro',
-  final: process.env.LLM_TIER_FINAL || process.env.LLM_MODEL || 'kimi-k2.6',
+  screen: process.env.LLM_TIER_SCREEN || process.env.LLM_MODEL || 'MiMO-V2.5',
+  analyze: process.env.LLM_TIER_ANALYZE || process.env.LLM_MODEL || 'MiMO-V2.5-Pro',
+  final: process.env.LLM_TIER_FINAL || process.env.LLM_MODEL || 'MiMO-V2-Omni',
 };
 
 // ---------------------------------------------------------------------------
@@ -42,9 +42,9 @@ function checkBudget() {
 /** Rough per-call cost heuristic based on token count. */
 function estimateCost(model, totalTokens) {
   const rates = {
-    'deepseek-v4-flash': 0.000001,
-    'deepseek-v4-pro': 0.000005,
-    'kimi-k2.6': 0.000008,
+    'MiMO-V2.5': 0.000001,
+    'MiMO-V2.5-Pro': 0.000005,
+    'MiMO-V2-Omni': 0.000008,
   };
   return totalTokens * (rates[model] ?? 0.000001);
 }
@@ -165,6 +165,9 @@ function buildBatchMessages(rows, triggerCandidateId) {
 // ---------------------------------------------------------------------------
 function parseBatchResponse(rawResponse, rows) {
   const content = rawResponse?.choices?.[0]?.message?.content || '';
+  if (!content.trim()) {
+    throw new Error('LLM returned an empty response content');
+  }
   const stripped = stripThinking(content);
   const parsed = strictJsonFromText(stripped);
   const decision = normalizeDecision(parsed);
