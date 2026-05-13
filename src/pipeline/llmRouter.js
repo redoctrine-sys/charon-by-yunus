@@ -169,6 +169,15 @@ function buildBatchMessages(rows, triggerCandidateId) {
   // Limit to 5 candidates to keep input tokens manageable for MiMO's context window
   const top = rows.slice(0, 5);
 
+  // Inject strategy-specific LLM hint if present (e.g. Sniper Lock adaptive entry rules)
+  const strategyHint = (() => {
+    try {
+      const { activeStrategy } = require('../db/settings.js');
+      const strat = activeStrategy();
+      return strat?.llm_strategy_hint || null;
+    } catch { return null; }
+  })();
+
   const system = [
     'You are Charon, a Solana meme coin trench analyst.',
     'Output ONLY a single-line JSON with no explanation, no markdown, no code fences.',
@@ -177,7 +186,8 @@ function buildBatchMessages(rows, triggerCandidateId) {
     'Use WATCH if interesting but none deserves a buy. Use PASS if weak or unsafe.',
     'Chart data is ATH/range context.',
     'Confidence is your conviction 0-100.',
-  ].join(' ');
+    strategyHint ? `ACTIVE STRATEGY RULES: ${strategyHint}` : '',
+  ].filter(Boolean).join(' ');
 
   const user = {
     task: 'Pick the best buy candidate, or PASS. Keep reason under 15 words.',

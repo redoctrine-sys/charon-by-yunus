@@ -450,6 +450,55 @@ export function initDb() {
     use_llm: false,
     llm_min_confidence: 0,
   }), ts);
+
+  stratInsert.run('sniper_lock', 'Sniper Lock', 0, JSON.stringify({
+    entry_mode: 'immediate',
+    // Age limit is OFF — entry mode is determined adaptively by the LLM per llm_strategy_hint
+    token_age_max_ms: 0,
+    min_source_count: 2,
+    // Fee claim is only required for fresh tokens (<1h); enforced via LLM hint, not hard filter
+    require_fee_claim: false,
+    min_mcap_usd: 7000,
+    max_mcap_usd: 100000,
+    min_fee_claim_sol: 0,
+    min_gmgn_total_fee_sol: 0,
+    min_holders: 0,
+    max_top20_holder_percent: 100,
+    min_saved_wallet_holders: 0,
+    max_ath_distance_pct: 0,
+    min_graduated_volume_usd: 0,
+    trending_min_volume_usd: 0,
+    trending_min_swaps: 0,
+    trending_max_rug_ratio: 0.3,
+    trending_max_bundler_rate: 0.5,
+    position_size_sol: 0.1,
+    max_open_positions: 5,
+    tp_percent: 9999,
+    sl_percent: -25,
+    trailing_enabled: false,
+    trailing_percent: 0,
+    partial_tp: false,
+    partial_tp_at_percent: 0,
+    partial_tp_sell_percent: 0,
+    max_hold_ms: 0,
+    use_llm: true,
+    llm_min_confidence: 60,
+    // Profit Lock exit system — replaces static TP/trailing
+    profit_lock_enabled: true,
+    profit_lock_tiers: [
+      { trigger: 15, floor: 5 },
+      { trigger: 40, floor: 20 },
+      { trigger: 80, floor: 50 },
+    ],
+    profit_lock_dynamic_buffer: 30,
+    // LLM receives this hint so it applies age-aware entry logic and volume spike checks
+    llm_strategy_hint: [
+      'STRATEGY: Sniper Lock (adaptive entry + profit-lock exit).',
+      'If token age < 1 hour: require fee claim evidence and 2+ signals, entry is aggressive.',
+      'If token age > 1 hour: require a clear volume spike within the last 5 minutes AND at least one of: Smart Money/KOL wallet entry, Stoch RSI oversold on 1m TF, price approaching Supertrend breakout.',
+      'Exit is handled by Profit Lock tiers — do NOT use TP. If Smart Money is dumping or price fails Supertrend repeatedly, override tiers and flag as PASS.',
+    ].join(' '),
+  }), ts);
 }
 
 export function ensureColumn(table, column, ddl) {
