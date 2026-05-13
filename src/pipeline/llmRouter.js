@@ -12,9 +12,9 @@ import { stripThinking, strictJsonFromText, safeJson } from '../utils.js';
 // Tier model names — read from env, fall back to safe defaults
 // ---------------------------------------------------------------------------
 const MODELS = {
-  screen: process.env.LLM_TIER_SCREEN || process.env.LLM_MODEL || 'MiMO-V2.5',
-  analyze: process.env.LLM_TIER_ANALYZE || process.env.LLM_MODEL || 'MiMO-V2.5-Pro',
-  final: process.env.LLM_TIER_FINAL || process.env.LLM_MODEL || 'MiMO-V2-Omni',
+  screen: process.env.LLM_TIER_SCREEN || process.env.LLM_MODEL || 'mimo-v2.5',
+  analyze: process.env.LLM_TIER_ANALYZE || process.env.LLM_MODEL || 'mimo-v2.5-pro',
+  final: process.env.LLM_TIER_FINAL || process.env.LLM_MODEL || 'mimo-v2-omni',
 };
 
 // ---------------------------------------------------------------------------
@@ -42,9 +42,9 @@ function checkBudget() {
 /** Rough per-call cost heuristic based on token count. */
 function estimateCost(model, totalTokens) {
   const rates = {
-    'MiMO-V2.5': 0.000001,
-    'MiMO-V2.5-Pro': 0.000005,
-    'MiMO-V2-Omni': 0.000008,
+    'mimo-v2.5': 0.000001,
+    'mimo-v2.5-pro': 0.000005,
+    'mimo-v2-omni': 0.000008,
   };
   return totalTokens * (rates[model] ?? 0.000001);
 }
