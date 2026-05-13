@@ -4,6 +4,7 @@ import { upsertCandidate, updateCandidateStatus, recentEligibleCandidates, candi
 import { storeDecision, storeBatchDecision, logDecisionEvent } from '../db/decisions.js';
 import { buildCandidate, filterCandidate, signalLabel } from './candidateBuilder.js';
 import { decideCandidateBatch } from './llm.js';
+import { decideCandidateBatchRouted, currentWindowCost } from './llmRouter.js';
 import { activeStrategy } from '../db/settings.js';
 import { createDryRunPosition, createLivePosition, canOpenMorePositions, openPositionCount, tradingMode } from '../db/positions.js';
 import { sendBatchReveal, sendTelegram, sendPositionOpen, sendTradeIntent } from '../telegram/send.js';
@@ -16,18 +17,17 @@ import { setDegenHandler } from '../signals/trending.js';
 import { setCandidateHandler } from '../signals/feeClaim.js';
 import { short } from '../format.js';
 import { escapeHtml } from '../format.js';
-import { canEnterNewPositions } from '../agentState.js';
 
 export const seenSignalCandidates = new Map();
+
+/** Use tiered LLM router when LLM_TIER_SCREEN env var is set; otherwise fall back to original single-model. */
+const USE_LLM_ROUTER = Boolean(process.env.LLM_TIER_SCREEN);
+let _budgetAlertSent = false;
 
 setDegenHandler(maybeProcessDegenCandidate);
 setCandidateHandler(processCandidateFromSignals);
 
 export async function processCandidateFromSignals(signals) {
-  if (!canEnterNewPositions()) {
-    console.log(`[agent] paused/stopped, skipping signal ${signals.mint?.slice(0, 8)}...`);
-    return;
-  }
   // Skip if max positions reached — don't waste enrichment/LLM calls
   if (!canOpenMorePositions()) {
     const max = numSetting('max_open_positions', 3);
@@ -64,7 +64,16 @@ export async function processCandidateFromSignals(signals) {
     };
   } else {
     rows = recentEligibleCandidates(numSetting('llm_candidate_pick_count', 10));
-    batchDecision = await decideCandidateBatch(rows, candidateId);
+    if (USE_LLM_ROUTER) {
+      batchDecision = await decideCandidateBatchRouted(rows, candidateId);
+      // Notify once per boot when budget window is exhausted
+      if (batchDecision._budget_exceeded && !_budgetAlertSent) {
+        _budgetAlertSent = true;
+        await sendTelegram(`⚠️ <b>LLM Budget Window Exhausted</b>\n\nSpend this 5-hour window: <code>$${currentWindowCost().toFixed(4)}</code>\nBot will return WATCH for all LLM calls until the window resets.`);
+      }
+    } else {
+      batchDecision = await decideCandidateBatch(rows, candidateId);
+    }
     batchId = storeBatchDecision(candidateId, rows, batchDecision);
   }
   const selectedRow = batchDecision.selected_row;
