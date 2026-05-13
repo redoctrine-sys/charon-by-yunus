@@ -6,7 +6,7 @@ import {
   compactCandidateForLlm,
 } from './llm.js';
 import { numSetting } from '../db/settings.js';
-import { stripThinking, strictJsonFromText } from '../utils.js';
+import { stripThinking, strictJsonFromText, safeJson } from '../utils.js';
 
 // ---------------------------------------------------------------------------
 // Tier model names — read from env, fall back to safe defaults
@@ -61,40 +61,63 @@ async function callTier(messages, tier) {
   const model = MODELS[tier];
   if (!model) throw new Error(`[llmRouter] Unknown tier: ${tier}`);
 
-  const res = await axios.post(
-    `${LLM_BASE_URL.replace(/\/$/, '')}/chat/completions`,
-    {
-      model,
-      messages,
-      temperature: 0.2,
-      max_tokens: Number(process.env.LLM_MAX_TOKENS || 1500),
-    },
-    {
-      timeout: LLM_TIMEOUT_MS,
-      headers: {
-        authorization: `Bearer ${LLM_API_KEY}`,
-        'content-type': 'application/json',
+  let res;
+  try {
+    res = await axios.post(
+      `${LLM_BASE_URL.replace(/\/$/, '')}/chat/completions`,
+      {
+        model,
+        messages,
+        temperature: 0.2,
+        max_tokens: Number(process.env.LLM_MAX_TOKENS || 1500),
       },
-    },
-  );
+      {
+        timeout: LLM_TIMEOUT_MS,
+        headers: {
+          authorization: `Bearer ${LLM_API_KEY}`,
+          'content-type': 'application/json',
+        },
+      },
+    );
+  } catch (axiosErr) {
+    // Log full error details so we can see the actual API error body
+    const status = axiosErr.response?.status;
+    const body = JSON.stringify(axiosErr.response?.data)?.slice(0, 300) || axiosErr.message;
+    throw new Error(`HTTP ${status ?? 'ERR'} from ${tier}: ${body}`);
+  }
+
+  // Validate response shape — opencode.ai may return {error:...} with status 200
+  const data = res.data;
+  if (data?.error) {
+    const errMsg = typeof data.error === 'string' ? data.error : JSON.stringify(data.error);
+    throw new Error(`API error (${tier}): ${errMsg}`);
+  }
+  if (!Array.isArray(data?.choices) || data.choices.length === 0) {
+    const snippet = JSON.stringify(data)?.slice(0, 200) || '(empty body)';
+    throw new Error(`No choices in response (${tier}): ${snippet}`);
+  }
 
   // Track estimated cost
-  const usage = res.data?.usage;
+  const usage = data?.usage;
   if (usage?.total_tokens) {
     BUDGET.windowCost += estimateCost(model, usage.total_tokens);
   }
 
-  return { ...res.data, _tier: tier, _model: model };
+  return { ...data, _tier: tier, _model: model };
 }
 
 // ---------------------------------------------------------------------------
-// Extract confidence from a raw LLM response
+// Extract confidence from a raw LLM response (never throws)
 // ---------------------------------------------------------------------------
 function extractConfidence(rawResponse) {
   const content = rawResponse?.choices?.[0]?.message?.content || '';
+  if (!content) return 0;
   const stripped = stripThinking(content);
-  const parsed = strictJsonFromText(stripped);
-  return Number(parsed?.confidence) || 0;
+  // Try strict JSON first, then regex fallback
+  const parsed = safeJson(stripped.match(/\{[\s\S]*\}/)?.[0] || '', null);
+  if (parsed?.confidence != null) return Number(parsed.confidence) || 0;
+  const match = stripped.match(/"?confidence"?\s*[:\s]+([0-9]+)/);
+  return match ? Number(match[1]) : 0;
 }
 
 // ---------------------------------------------------------------------------
