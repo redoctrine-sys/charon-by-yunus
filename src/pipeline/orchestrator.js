@@ -16,6 +16,7 @@ import { setDegenHandler } from '../signals/trending.js';
 import { setCandidateHandler } from '../signals/feeClaim.js';
 import { short } from '../format.js';
 import { escapeHtml } from '../format.js';
+import { canEnterNewPositions } from '../agentState.js';
 
 export const seenSignalCandidates = new Map();
 
@@ -23,6 +24,10 @@ setDegenHandler(maybeProcessDegenCandidate);
 setCandidateHandler(processCandidateFromSignals);
 
 export async function processCandidateFromSignals(signals) {
+  if (!canEnterNewPositions()) {
+    console.log(`[agent] paused/stopped, skipping signal ${signals.mint?.slice(0, 8)}...`);
+    return;
+  }
   // Skip if max positions reached — don't waste enrichment/LLM calls
   if (!canOpenMorePositions()) {
     const max = numSetting('max_open_positions', 3);

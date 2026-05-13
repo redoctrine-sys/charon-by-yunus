@@ -7,6 +7,7 @@ import { monitorPositions } from './execution/positions.js';
 import { processCandidateFromSignals, maybeProcessDegenCandidate } from './pipeline/orchestrator.js';
 import { sendTelegram } from './telegram/send.js';
 import { makeFailureTracker } from './utils.js';
+import { canMonitorPositions } from './agentState.js';
 
 setDefaultResultOrder('ipv4first');
 validateConfig();
@@ -59,5 +60,8 @@ export async function startCharon() {
 
   // Position monitoring runs in both modes
   const trackPositions = makeFailureTracker('position monitor', (msg) => sendTelegram(msg));
-  setInterval(() => trackPositions(() => monitorPositions()), POSITION_CHECK_MS);
+  setInterval(() => {
+    if (!canMonitorPositions()) return;
+    trackPositions(() => monitorPositions());
+  }, POSITION_CHECK_MS);
 }

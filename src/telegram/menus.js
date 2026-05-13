@@ -1,12 +1,35 @@
 import { escapeHtml, fmtPct, fmtSol, fmtUsd, short } from '../format.js';
 import { numSetting, boolSetting, setting, activeStrategy, allStrategies } from '../db/settings.js';
 import { openPositionCount, tradingMode, allPositions } from '../db/positions.js';
+import { agentState } from '../agentState.js';
 import { savedWallets } from '../enrichment/wallets.js';
 import { gmgnStatusText } from '../enrichment/gmgn.js';
 import { formatPosition } from './format.js';
 import { ENABLE_LLM, LLM_API_KEY } from '../config.js';
 
+export function controlPanelText() {
+  const state = agentState();
+  const stateIcon = state === 'running' ? '🟢' : state === 'paused' ? '⏸' : '🔴';
+  const strat = activeStrategy();
+  return [
+    `🛶 <b>Charon Control Panel</b>`,
+    `State: ${stateIcon} <b>${state}</b>`,
+    `Mode: ${tradingMode()} · Strategy: ${escapeHtml(strat.name)}`,
+    `Open positions: ${openPositionCount()}/${strat.max_open_positions || '∞'}`,
+    '',
+    state === 'running' ? 'Agent is active — new signals processed.' : state === 'paused' ? 'Agent paused — signals ignored, positions monitored.' : 'Agent stopped — no signal processing, no monitoring.',
+  ].join('\n');
+}
+
 export function menuKeyboard() {
+  const state = agentState();
+  const stateIcon = state === 'running' ? '🟢' : state === 'paused' ? '⏸' : '🔴';
+  const pauseResumeBtn = state === 'running'
+    ? { text: '⏸ Pause', callback_data: 'agent_pause' }
+    : { text: '▶ Resume', callback_data: 'agent_resume' };
+  const stopStartBtn = state === 'stopped'
+    ? { text: '▶ Start', callback_data: 'agent_start' }
+    : { text: '🔴 Stop', callback_data: 'agent_stop' };
   return {
     reply_markup: {
       inline_keyboard: [
@@ -19,6 +42,11 @@ export function menuKeyboard() {
           { text: 'Wallets', callback_data: 'menu:wallets' },
           { text: 'Positions', callback_data: 'menu:positions' },
           { text: 'PnL', callback_data: 'menu:pnl' },
+        ],
+        [
+          { text: `${stateIcon} Status`, callback_data: 'agent_status' },
+          pauseResumeBtn,
+          stopStartBtn,
         ],
       ],
     },
@@ -173,7 +201,9 @@ export function navKeyboard(rows = []) {
 }
 
 export function mainMenuText() {
-  return `🛶 <b>Charon</b>\nDry-run trench agent online.`;
+  const state = agentState();
+  const stateIcon = state === 'running' ? '🟢' : state === 'paused' ? '⏸' : '🔴';
+  return `🛶 <b>Charon</b>\n${stateIcon} ${state} · ${tradingMode()} mode`;
 }
 
 export function walletsText() {
@@ -186,7 +216,8 @@ export function walletsText() {
 
 export function positionsText() {
   const rows = allPositions(12);
-  const text = rows.length ? rows.map(formatPosition).join('\n\n') : 'No dry-run positions yet.';
+  const formatted = rows.map(formatPosition).filter(Boolean);
+  const text = formatted.length ? formatted.join('\n\n') : 'No positions visible (use /showpnl to show all).';
   return `📍 <b>Positions</b>\n\n${text}`;
 }
 
@@ -357,6 +388,10 @@ export function positionButtons(positionId) {
   return {
     reply_markup: {
       inline_keyboard: [
+        [
+          { text: '💸 Sell 100%', callback_data: `sellpos:${positionId}:100` },
+          { text: '💰 Sell 50%', callback_data: `sellpos:${positionId}:50` },
+        ],
         [
           { text: 'Dry Sell', callback_data: `sell:${positionId}` },
           { text: 'Refresh', callback_data: `pos:${positionId}` },

@@ -1,14 +1,15 @@
-import { now, json } from '../utils.js';
+import { now, json, firstPositiveNumber } from '../utils.js';
 import { numSetting, boolSetting } from '../db/settings.js';
 import { db } from '../db/connection.js';
 import { WSOL_MINT, LIVE_MIN_SOL_RESERVE_LAMPORTS } from '../config.js';
 import { escapeHtml, fmtSol } from '../format.js';
 import { executeJupiterSwap, liveWalletBalanceLamports, fetchLiveTokenBalance } from '../liveExecutor.js';
 import { activeStrategy } from '../db/settings.js';
-import { createLivePosition, canOpenMorePositions, openPositionCount } from '../db/positions.js';
+import { createLivePosition, canOpenMorePositions, openPositionCount, openPositions } from '../db/positions.js';
 import { intentById } from '../db/intents.js';
 import { logDecisionEvent } from '../db/decisions.js';
 import { refreshCandidateForExecution } from './positions.js';
+import { fetchJupiterAsset } from '../enrichment/jupiter.js';
 import { bot } from '../telegram/bot.js';
 import { candidateSummary } from '../telegram/format.js';
 import { sendPositionOpen, sendTelegram } from '../telegram/send.js';
@@ -110,6 +111,65 @@ export async function executeConfirmedIntent(chatId, intentId) {
     db.prepare('UPDATE trade_intents SET status = ?, updated_at_ms = ? WHERE id = ?').run('execution_failed', now(), intentId);
     return bot.sendMessage(chatId, `Live execution failed: ${escapeHtml(err.message)}`, { parse_mode: 'HTML' });
   }
+}
+
+const manualSellInProgress = new Set();
+
+export async function manualSell(positionId, sellPercent = 100, triggeredBy = 'telegram') {
+  if (manualSellInProgress.has(positionId)) throw new Error('Sell already in progress for this position.');
+  manualSellInProgress.add(positionId);
+  try {
+    const pos = db.prepare('SELECT * FROM dry_run_positions WHERE id = ?').get(positionId);
+    if (!pos || pos.status !== 'open') throw new Error('Open position not found.');
+    const asset = await fetchJupiterAsset(pos.mint);
+    const freshPrice = firstPositiveNumber(asset?.usdPrice, pos.high_water_price, pos.entry_price);
+    const freshMcap = firstPositiveNumber(asset?.mcap, asset?.fdv, pos.high_water_mcap, pos.entry_mcap);
+    const freshPnl = pos.entry_mcap ? (Number(freshMcap) / Number(pos.entry_mcap) - 1) * 100 : 0;
+    const pct = Math.min(100, Math.max(1, sellPercent));
+    let sell = null;
+    if (pos.execution_mode === 'live' && pos.token_amount_raw) {
+      const rawSell = Math.floor(Number(pos.token_amount_raw) * (pct / 100));
+      if (rawSell > 0) {
+        sell = await executeLiveSell({ ...pos, token_amount_raw: String(rawSell) }, `MANUAL_${triggeredBy.toUpperCase()}`);
+        if (pct < 100) {
+          const remaining = Number(pos.token_amount_raw) - rawSell;
+          db.prepare('UPDATE dry_run_positions SET token_amount_raw = ? WHERE id = ?').run(String(remaining), positionId);
+        }
+      }
+    }
+    const sizeSol = Number(pos.size_sol) * (pct / 100);
+    const pnlSol = sizeSol * freshPnl / 100;
+    db.prepare(`
+      INSERT INTO dry_run_trades (position_id, mint, side, at_ms, price, mcap, size_sol, token_amount_est, reason, payload_json)
+      VALUES (?, ?, 'sell', ?, ?, ?, ?, ?, ?, ?)
+    `).run(positionId, pos.mint, now(), freshPrice, freshMcap, sizeSol, pos.token_amount_est, `MANUAL_${pct}pct`, json({ pct, pnlPercent: freshPnl, pnlSol, triggeredBy, sell }));
+    if (pct === 100) {
+      db.prepare(`
+        UPDATE dry_run_positions
+        SET status = 'closed', closed_at_ms = ?, exit_price = ?, exit_mcap = ?, exit_reason = ?, pnl_percent = ?, pnl_sol = ?
+        ${sell?.signature ? ', exit_signature = ?' : ''}
+        WHERE id = ?
+      `).run(...[now(), freshPrice, freshMcap, `MANUAL_${triggeredBy.toUpperCase()}`, freshPnl, pnlSol, ...(sell?.signature ? [sell.signature] : []), positionId]);
+    }
+    return { success: true, pnl: freshPnl, sell };
+  } finally {
+    manualSellInProgress.delete(positionId);
+  }
+}
+
+export async function sellAll(triggeredBy = 'telegram') {
+  const positions = openPositions();
+  const results = [];
+  for (const pos of positions) {
+    try {
+      const result = await manualSell(pos.id, 100, triggeredBy);
+      results.push({ id: pos.id, mint: pos.mint, success: true, pnl: result.pnl });
+    } catch (err) {
+      results.push({ id: pos.id, mint: pos.mint, success: false, error: err.message });
+    }
+    await new Promise(r => setTimeout(r, 500));
+  }
+  return results;
 }
 
 export async function rejectIntent(chatId, intentId) {

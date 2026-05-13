@@ -2,6 +2,24 @@ import { db } from './connection.js';
 import { now, json } from '../utils.js';
 import { numSetting, boolSetting, setting, activeStrategy } from './settings.js';
 
+function captureEntrySnapshot(positionId, candidate, decision, strategyId) {
+  try {
+    const price = Number(candidate.metrics?.priceUsd || 0) || null;
+    const mcap = Number(candidate.metrics?.marketCapUsd || candidate.metrics?.graduatedMarketCapUsd || 0) || null;
+    db.prepare(`
+      INSERT INTO position_snapshots (position_id, phase, timestamp_ms, price, mcap, pnl_pct, data_json, created_at_ms)
+      VALUES (?, 'entry', ?, ?, ?, 0, ?, ?)
+    `).run(
+      positionId,
+      now(),
+      price,
+      mcap,
+      JSON.stringify({ strategy_id: strategyId, llm_confidence: decision?.confidence, llm_verdict: decision?.verdict }),
+      now(),
+    );
+  } catch { /* never block entry */ }
+}
+
 export function openPositions() {
   return db.prepare('SELECT * FROM dry_run_positions WHERE status = ? ORDER BY opened_at_ms DESC').all('open');
 }
@@ -76,6 +94,7 @@ export function createDryRunPosition(candidateId, candidate, decision, reason = 
       INSERT INTO tp_sl_rules (position_id, tp_percent, sl_percent, trailing_enabled, trailing_percent, updated_at_ms)
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(positionId, tp, sl, trailingEnabled, trailingPercent, now());
+    captureEntrySnapshot(positionId, candidate, decision, strat.id);
     return positionId;
   })();
 }
@@ -133,6 +152,7 @@ export function createLivePosition(candidateId, candidate, decision, swap, reaso
       INSERT INTO tp_sl_rules (position_id, tp_percent, sl_percent, trailing_enabled, trailing_percent, updated_at_ms)
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(positionId, tp, sl, trailingEnabled, trailingPercent, now());
+    captureEntrySnapshot(positionId, candidate, decision, strat.id);
     return positionId;
   })();
 }

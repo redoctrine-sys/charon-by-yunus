@@ -198,6 +198,36 @@ export function initDb() {
     CREATE INDEX IF NOT EXISTS idx_decision_logs_mint ON decision_logs(selected_mint);
     CREATE INDEX IF NOT EXISTS idx_signal_events_mint ON signal_events(mint);
     CREATE INDEX IF NOT EXISTS idx_learning_lessons_status ON learning_lessons(status, created_at_ms);
+    CREATE TABLE IF NOT EXISTS agent_current_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      state TEXT NOT NULL DEFAULT 'running',
+      changed_at_ms INTEGER NOT NULL DEFAULT 0,
+      reason TEXT
+    );
+    CREATE TABLE IF NOT EXISTS agent_state_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      old_state TEXT NOT NULL,
+      new_state TEXT NOT NULL,
+      reason TEXT,
+      triggered_by TEXT,
+      created_at_ms INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS position_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      position_id INTEGER NOT NULL,
+      phase TEXT NOT NULL,
+      timestamp_ms INTEGER NOT NULL,
+      price REAL,
+      mcap REAL,
+      pnl_pct REAL,
+      exit_reason TEXT,
+      exit_triggered_by TEXT,
+      holding_duration_ms INTEGER,
+      max_pnl_pct REAL,
+      data_json TEXT,
+      created_at_ms INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_snapshots_position ON position_snapshots(position_id);
   `);
   ensureColumn('candidates', 'signal_key', 'TEXT');
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_candidates_signal_key ON candidates(signal_key) WHERE signal_key IS NOT NULL');
@@ -207,7 +237,12 @@ export function initDb() {
   ensureColumn('dry_run_positions', 'token_amount_raw', 'TEXT');
   ensureColumn('dry_run_positions', 'strategy_id', "TEXT DEFAULT 'sniper'");
   ensureColumn('dry_run_positions', 'partial_tp_done', 'INTEGER DEFAULT 0');
+  ensureColumn('dry_run_positions', 'profit_lock_state', 'TEXT');
+  ensureColumn('dry_run_positions', 'partial_tp_state', 'TEXT');
+  ensureColumn('price_alerts', 'stoch_rsi_k', 'REAL');
+  ensureColumn('price_alerts', 'stoch_rsi_d', 'REAL');
   ensureColumn('decision_logs', 'strategy_id', 'TEXT');
+  db.prepare(`INSERT OR IGNORE INTO agent_current_state (id, state, changed_at_ms) VALUES (1, 'running', ?)`).run(Date.now());
 
   const defaults = {
     agent_enabled: 'true',
@@ -228,6 +263,7 @@ export function initDb() {
     min_graduated_volume_usd: '0',
     max_top20_holder_percent: '100',
     min_saved_wallet_holders: '0',
+    pnl_visibility: 'show_all',
     gmgn_request_delay_ms: process.env.GMGN_REQUEST_DELAY_MS || '2500',
     gmgn_max_retries: process.env.GMGN_MAX_RETRIES || '2',
     trending_enabled: process.env.TRENDING_ENABLED || 'true',
@@ -342,6 +378,45 @@ export function initDb() {
     max_hold_ms: 0,
     use_llm: true,
     llm_min_confidence: 70,
+  }), ts);
+
+  stratInsert.run('profit_lock', 'Profit Lock', 0, JSON.stringify({
+    entry_mode: 'immediate',
+    min_source_count: 1,
+    require_fee_claim: false,
+    token_age_max_ms: 3600000,
+    min_mcap_usd: 5000,
+    max_mcap_usd: 100000,
+    min_fee_claim_sol: 0,
+    min_gmgn_total_fee_sol: 0,
+    min_holders: 0,
+    max_top20_holder_percent: 100,
+    min_saved_wallet_holders: 0,
+    max_ath_distance_pct: 0,
+    min_graduated_volume_usd: 0,
+    trending_min_volume_usd: 0,
+    trending_min_swaps: 0,
+    trending_max_rug_ratio: 0.4,
+    trending_max_bundler_rate: 0.5,
+    position_size_sol: 0.05,
+    max_open_positions: 7,
+    tp_percent: 9999,
+    sl_percent: -20,
+    trailing_enabled: false,
+    trailing_percent: 0,
+    partial_tp: false,
+    partial_tp_at_percent: 0,
+    partial_tp_sell_percent: 0,
+    max_hold_ms: 0,
+    use_llm: true,
+    llm_min_confidence: 70,
+    profit_lock_enabled: true,
+    profit_lock_tiers: [
+      { trigger: 15, floor: 5 },
+      { trigger: 40, floor: 20 },
+      { trigger: 80, floor: 50 },
+    ],
+    profit_lock_dynamic_buffer: 30,
   }), ts);
 
   stratInsert.run('degen', 'Degen', 0, JSON.stringify({

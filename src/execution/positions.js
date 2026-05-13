@@ -107,6 +107,85 @@ export async function refreshCandidateForExecution(row) {
 
 const sellInProgress = new Set();
 
+function checkProfitLockExit(position, pnlPercent) {
+  const strat = strategyById(position.strategy_id);
+  if (!strat?.profit_lock_enabled) return null;
+  const tiers = strat.profit_lock_tiers || [];
+  const dynamicBuffer = strat.profit_lock_dynamic_buffer ?? 30;
+
+  let lockState = {};
+  try { lockState = JSON.parse(position.profit_lock_state || '{}'); } catch { lockState = {}; }
+
+  const highPnl = Math.max(lockState.high_pnl_pct || 0, pnlPercent);
+  let floorPct = lockState.floor_pct || null;
+  let tier = lockState.tier || 0;
+
+  if (pnlPercent >= 80 || tier >= tiers.length) {
+    const dynamicFloor = Math.max(50, highPnl - dynamicBuffer);
+    floorPct = floorPct != null ? Math.max(floorPct, dynamicFloor) : dynamicFloor;
+    tier = tiers.length;
+  } else {
+    for (let i = tiers.length - 1; i >= tier; i--) {
+      if (pnlPercent >= tiers[i].trigger) {
+        const newFloor = tiers[i].floor;
+        floorPct = floorPct != null ? Math.max(floorPct, newFloor) : newFloor;
+        tier = i + 1;
+        break;
+      }
+    }
+  }
+
+  const newState = JSON.stringify({ high_pnl_pct: highPnl, floor_pct: floorPct, tier });
+  db.prepare('UPDATE dry_run_positions SET profit_lock_state = ? WHERE id = ?').run(newState, position.id);
+
+  if (floorPct != null && pnlPercent <= floorPct) {
+    return { shouldExit: true, reason: `PROFIT_LOCK_FLOOR_${floorPct.toFixed(0)}` };
+  }
+  return null;
+}
+
+async function checkPartialTpLadder(position, pnlPercent, price, mcap) {
+  const strat = strategyById(position.strategy_id);
+  const tiers = strat?.partial_tp_tiers;
+  if (!tiers?.length) return;
+
+  let state = {};
+  try { state = JSON.parse(position.partial_tp_state || '{}'); } catch { state = {}; }
+  const executed = state.executed || [];
+
+  for (const tier of tiers) {
+    if (executed.includes(tier.trigger)) continue;
+    if (pnlPercent < tier.trigger) continue;
+
+    const pct = tier.sell_percent || 50;
+    console.log(`[position] ${position.id} partial TP ladder tier @${tier.trigger}% sell ${pct}%`);
+
+    if (position.execution_mode === 'live' && position.token_amount_raw) {
+      try {
+        const sellAmount = Math.floor(Number(position.token_amount_raw) * (pct / 100));
+        if (sellAmount > 0) {
+          const sell = await executeLiveSell({ ...position, token_amount_raw: String(sellAmount) }, `PARTIAL_TP_${tier.trigger}`);
+          const remaining = Number(position.token_amount_raw) - sellAmount;
+          db.prepare('UPDATE dry_run_positions SET token_amount_raw = ? WHERE id = ?').run(String(remaining), position.id);
+          db.prepare(`
+            INSERT INTO dry_run_trades (position_id, mint, side, at_ms, price, mcap, size_sol, token_amount_est, reason, payload_json)
+            VALUES (?, ?, 'sell', ?, ?, ?, ?, ?, ?, ?)
+          `).run(position.id, position.mint, now(), price, mcap,
+            position.size_sol * (pct / 100), sellAmount,
+            json({ pct, tier: tier.trigger }), json({ pnlPercent, sell, tier }));
+        }
+      } catch (err) {
+        console.log(`[position] ${position.id} partial TP ladder sell failed: ${err.message}`);
+      }
+    }
+
+    executed.push(tier.trigger);
+    state.executed = executed;
+    db.prepare('UPDATE dry_run_positions SET partial_tp_state = ? WHERE id = ?').run(JSON.stringify(state), position.id);
+    break;
+  }
+}
+
 export async function refreshPosition(position, { autoExit = true, jupiterPnl = null } = {}) {
   const asset = await fetchJupiterAsset(position.mint);
   const price = firstPositiveNumber(asset?.usdPrice, position.high_water_price, position.entry_price);
@@ -136,8 +215,11 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
     exitReason = 'MAX_HOLD';
   }
 
-  // Partial TP check
-  if (!exitReason && strat?.partial_tp && !position.partial_tp_done && pnlPercent >= strat.partial_tp_at_percent) {
+  // Partial TP Ladder (#1) — tiered sell system
+  if (!exitReason && strat?.partial_tp_tiers?.length) {
+    await checkPartialTpLadder(position, pnlPercent, price, mcap);
+  } else if (!exitReason && strat?.partial_tp && !position.partial_tp_done && pnlPercent >= strat.partial_tp_at_percent) {
+    // Legacy binary partial TP
     db.prepare('UPDATE dry_run_positions SET partial_tp_done = 1 WHERE id = ?').run(position.id);
     console.log(`[position] ${position.id} partial TP at ${pnlPercent.toFixed(1)}% (${strat.partial_tp_sell_percent}% sell)`);
     if (position.execution_mode === 'live' && position.token_amount_raw) {
@@ -161,11 +243,18 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
     }
   }
 
-  // Standard exit checks
+  // Profit Lock (#4)
+  if (!exitReason && strat?.profit_lock_enabled) {
+    const lockResult = checkProfitLockExit(position, pnlPercent);
+    if (lockResult?.shouldExit) exitReason = lockResult.reason;
+  }
+
+  // Standard exit checks (profit_lock suppresses standard SL/TP)
   if (!exitReason) {
-    if (slHit) exitReason = 'SL';
-    else if (tpHit && !position.trailing_enabled) exitReason = 'TP';
+    if (slHit && !strat?.profit_lock_enabled) exitReason = 'SL';
+    else if (tpHit && !position.trailing_enabled && !strat?.profit_lock_enabled) exitReason = 'TP';
     else if (trailingHit) exitReason = 'TRAILING_TP';
+    else if (slHit && strat?.profit_lock_enabled) exitReason = 'SL';
   }
 
   // Live exits will override these with realized SOL values
@@ -252,6 +341,36 @@ export async function monitorPositions() {
       console.log(`[position] ${position.id} ${err.message}`);
       return null;
     });
-    if (result?.exitReason) await sendPositionExit(result);
+    if (result?.exitReason) {
+      await sendPositionExit(result);
+      captureExitSnapshot(result);
+    }
+  }
+}
+
+function captureExitSnapshot(result) {
+  try {
+    const holdingMs = result.closed_at_ms && result.opened_at_ms
+      ? Number(result.closed_at_ms) - Number(result.opened_at_ms)
+      : null;
+    let lockState = {};
+    try { lockState = JSON.parse(result.profit_lock_state || '{}'); } catch { lockState = {}; }
+    db.prepare(`
+      INSERT INTO position_snapshots (position_id, phase, timestamp_ms, price, mcap, pnl_pct, exit_reason, holding_duration_ms, max_pnl_pct, data_json, created_at_ms)
+      VALUES (?, 'exit', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      result.id,
+      now(),
+      result.exit_price ?? result.price ?? null,
+      result.exit_mcap ?? result.mcap ?? null,
+      result.pnl_percent ?? result.pnlPercent ?? null,
+      result.exitReason,
+      holdingMs,
+      lockState.high_pnl_pct ?? null,
+      JSON.stringify({ strategy_id: result.strategy_id, execution_mode: result.execution_mode }),
+      now(),
+    );
+  } catch (err) {
+    console.log(`[snapshot] exit capture failed: ${err.message}`);
   }
 }

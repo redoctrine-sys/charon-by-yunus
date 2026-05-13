@@ -1,9 +1,11 @@
 import { bot } from './bot.js';
 import { TELEGRAM_CHAT_ID } from '../config.js';
 import { now, json } from '../utils.js';
-import { escapeHtml, fmtPct } from '../format.js';
+import { escapeHtml, fmtPct, fmtSol } from '../format.js';
 import { db } from '../db/connection.js';
 import { numSetting, boolSetting, setSetting, activeStrategy, setActiveStrategy, strategyById, updateStrategyConfig } from '../db/settings.js';
+import { agentState, setState as setAgentState } from '../agentState.js';
+import { manualSell, sellAll } from '../execution/router.js';
 import { candidateById, latestCandidateByMint, updateCandidateStatus } from '../db/candidates.js';
 import { storeDecision, logDecisionEvent } from '../db/decisions.js';
 import {
@@ -25,6 +27,7 @@ import { sendTelegram, sendBatch, sendPositionOpen } from './send.js';
 import { candidateSummary, formatPosition } from './format.js';
 import { refreshPosition } from '../execution/positions.js';
 import { executeLiveSell } from '../execution/router.js';
+import { openPositionCount } from '../db/positions.js';
 import { handleCallback, editMenuMessage } from './callbacks.js';
 import { consumeNumericFilterInput } from './input.js';
 import { runLearning, sendLessons } from '../learning/commands.js';
@@ -44,7 +47,7 @@ export async function handleMessage(msg) {
     if (!id) {
       return bot.sendMessage(chatId, strategyMenuText(), { parse_mode: 'HTML', ...strategyKeyboard() });
     }
-    const valid = ['sniper', 'dip_buy', 'smart_money', 'degen'];
+    const valid = ['sniper', 'dip_buy', 'smart_money', 'degen', 'profit_lock'];
     if (!valid.includes(id)) {
       return bot.sendMessage(chatId, `Unknown strategy. Valid: ${valid.join(', ')}`);
     }
@@ -104,6 +107,64 @@ export async function handleMessage(msg) {
     return bot.sendMessage(chatId, `Removed ${label}.`);
   }
   if (text.startsWith('/wallets')) return handleCallback({ id: 'manual', data: 'menu:wallets', message: { chat: { id: chatId } } });
+  if (text.startsWith('/startbot') || text.startsWith('/resume')) {
+    setAgentState('running', 'Telegram command', msg.from?.username || 'user');
+    return bot.sendMessage(chatId, `✅ Agent resumed. State: running`);
+  }
+  if (text.startsWith('/pausebot')) {
+    setAgentState('paused', 'Telegram command', msg.from?.username || 'user');
+    return bot.sendMessage(chatId, `⏸ Agent paused. New signals ignored, open positions still monitored.`);
+  }
+  if (text.startsWith('/stopbot_confirm')) {
+    setAgentState('stopped', 'Telegram command', msg.from?.username || 'user');
+    return bot.sendMessage(chatId, `🔴 Agent stopped. No new signals, no position monitoring.`);
+  }
+  if (text.startsWith('/stopbot')) {
+    const count = openPositionCount();
+    return bot.sendMessage(chatId, `⚠️ Stop agent? ${count} position(s) open.\nUse /stopbot_confirm to confirm.`);
+  }
+  if (text.startsWith('/status')) {
+    const { controlPanelText } = await import('./menus.js');
+    return bot.sendMessage(chatId, controlPanelText(), { parse_mode: 'HTML' });
+  }
+  if (text.startsWith('/hidepnl')) {
+    const mode = text.split(/\s+/)[1] || 'stealth';
+    setSetting('pnl_visibility', mode === 'history' ? 'hide_history' : 'stealth');
+    return bot.sendMessage(chatId, `PnL visibility set to: ${mode === 'history' ? 'hide_history' : 'stealth'}`);
+  }
+  if (text.startsWith('/showpnl')) {
+    setSetting('pnl_visibility', 'show_all');
+    return bot.sendMessage(chatId, 'PnL visibility: show_all');
+  }
+  if (text.startsWith('/sellhalf')) {
+    const posId = Number(text.split(/\s+/)[1]);
+    if (!posId) return bot.sendMessage(chatId, 'Usage: /sellhalf <position_id>');
+    try {
+      const result = await manualSell(posId, 50, msg.from?.username || 'user');
+      return bot.sendMessage(chatId, `💰 Sold 50% of position #${posId} · PnL ${fmtPct(result.pnl)}`, { parse_mode: 'HTML' });
+    } catch (err) {
+      return bot.sendMessage(chatId, `❌ Sell failed: ${err.message}`);
+    }
+  }
+  if (text.startsWith('/sell ')) {
+    const posId = Number(text.split(/\s+/)[1]);
+    if (!posId) return bot.sendMessage(chatId, 'Usage: /sell <position_id>');
+    try {
+      const result = await manualSell(posId, 100, msg.from?.username || 'user');
+      return bot.sendMessage(chatId, `💸 Sold 100% of position #${posId} · PnL ${fmtPct(result.pnl)}`, { parse_mode: 'HTML' });
+    } catch (err) {
+      return bot.sendMessage(chatId, `❌ Sell failed: ${err.message}`);
+    }
+  }
+  if (text.startsWith('/sellall_confirm')) {
+    const results = await sellAll(msg.from?.username || 'user');
+    const lines = results.map(r => r.success ? `✅ #${r.id} ${fmtPct(r.pnl)}` : `❌ #${r.id} ${r.error}`);
+    return bot.sendMessage(chatId, `Sell all complete:\n${lines.join('\n') || 'No open positions.'}`, { parse_mode: 'HTML' });
+  }
+  if (text.startsWith('/sellall')) {
+    const count = openPositionCount();
+    return bot.sendMessage(chatId, `⚠️ Sell all ${count} open position(s)?\nUse /sellall_confirm to confirm.`);
+  }
   if (text.startsWith('/setfilter')) {
     const { key, value } = parseSetFilter(text);
     const valid = new Set([
@@ -156,7 +217,8 @@ export async function sendCandidate(chatId, id) {
 
 export async function sendPositions(chatId) {
   const rows = allPositions(12);
-  const text = rows.length ? rows.map(formatPosition).join('\n\n') : 'No dry-run positions yet.';
+  const formatted = rows.map(formatPosition).filter(Boolean);
+  const text = formatted.length ? formatted.join('\n\n') : 'No positions visible (check /showpnl).';
   await bot.sendMessage(chatId, `📍 <b>Positions</b>\n\n${text}`, { parse_mode: 'HTML', disable_web_page_preview: true });
 }
 
@@ -239,9 +301,18 @@ export async function toggleTrailing(chatId, id, query = null) {
 export function setupTelegram() {
   bot.setMyCommands([
     { command: 'menu', description: 'Open Charon menu' },
+    { command: 'status', description: 'Show agent status & control panel' },
+    { command: 'startbot', description: 'Start / resume agent' },
+    { command: 'pausebot', description: 'Pause agent (positions still monitored)' },
+    { command: 'stopbot', description: 'Stop agent (confirm required)' },
     { command: 'strategy', description: 'Show/switch strategy' },
     { command: 'stratset', description: 'Set strategy config (stratset id key value)' },
     { command: 'positions', description: 'Show dry-run positions' },
+    { command: 'sell', description: 'Sell 100% of position (sell <id>)' },
+    { command: 'sellhalf', description: 'Sell 50% of position (sellhalf <id>)' },
+    { command: 'sellall', description: 'Sell all open positions (confirm required)' },
+    { command: 'hidepnl', description: 'Hide PnL (hidepnl stealth|history)' },
+    { command: 'showpnl', description: 'Show PnL again' },
     { command: 'candidate', description: 'Show candidate by mint' },
     { command: 'filters', description: 'Show filters' },
     { command: 'pnl', description: 'Show saved-wallet PnL' },

@@ -13,11 +13,48 @@ const gmgnBackoff = {
   trendingReason: '',
 };
 
+const adaptive = {
+  currentDelayMs: 2500,
+  consecutiveSuccess: 0,
+  consecutiveRateLimit: 0,
+  panicModeUntil: 0,
+  MIN_DELAY: 800,
+  MAX_DELAY: 8000,
+};
+
+function updateAdaptiveDelay(latencyMs, status) {
+  if (status === 200) {
+    adaptive.consecutiveRateLimit = 0;
+    adaptive.consecutiveSuccess++;
+    if (latencyMs < 800) {
+      adaptive.currentDelayMs = Math.max(adaptive.MIN_DELAY, adaptive.currentDelayMs - 500);
+    } else if (latencyMs > 2000) {
+      adaptive.currentDelayMs = Math.min(adaptive.MAX_DELAY, adaptive.currentDelayMs + 800);
+    }
+    if (adaptive.consecutiveSuccess >= 5) {
+      adaptive.currentDelayMs = Math.max(adaptive.MIN_DELAY, adaptive.currentDelayMs - 300);
+      adaptive.consecutiveSuccess = 0;
+    }
+  } else if (status === 429 || status === 403 || status === 503) {
+    adaptive.consecutiveSuccess = 0;
+    adaptive.consecutiveRateLimit++;
+    adaptive.currentDelayMs = Math.min(adaptive.MAX_DELAY, adaptive.currentDelayMs + 1500);
+    if (adaptive.consecutiveRateLimit >= 3) {
+      const cooldown = status === 503 ? 300000 : 120000;
+      adaptive.panicModeUntil = now() + cooldown;
+      adaptive.currentDelayMs = 5000;
+      console.warn(`[GMGN] Panic mode until ${new Date(adaptive.panicModeUntil).toISOString()} (${status})`);
+    }
+  }
+  console.log(`[GMGN] delay=${adaptive.currentDelayMs}ms latency=${latencyMs}ms status=${status} streak=${adaptive.consecutiveSuccess}`);
+}
+
 async function paceGmgnRequest() {
-  const delayMs = Math.max(0, numSetting('gmgn_request_delay_ms', 2500));
-  if (!delayMs) return;
+  if (now() < adaptive.panicModeUntil) {
+    await sleep(adaptive.panicModeUntil - now());
+  }
   const elapsed = now() - lastGmgnRequestAt;
-  if (elapsed < delayMs) await sleep(delayMs - elapsed);
+  if (elapsed < adaptive.currentDelayMs) await sleep(adaptive.currentDelayMs - elapsed);
   lastGmgnRequestAt = now();
 }
 
@@ -60,6 +97,7 @@ async function gmgnFetch(pathname, { params = {} } = {}) {
     const maxRetries = Math.max(0, Math.floor(numSetting('gmgn_max_retries', 2)));
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       await paceGmgnRequest();
+      const reqStart = now();
       const res = await fetch(url, {
         method: 'GET',
         headers: {
@@ -67,6 +105,7 @@ async function gmgnFetch(pathname, { params = {} } = {}) {
           'Content-Type': 'application/json',
         },
       });
+      const latency = now() - reqStart;
       const text = await res.text().catch(() => '');
       let payload = {};
       try {
@@ -74,9 +113,13 @@ async function gmgnFetch(pathname, { params = {} } = {}) {
       } catch {
         payload = { raw: text };
       }
-      if (res.ok) return payload;
+      if (res.ok) {
+        updateAdaptiveDelay(latency, 200);
+        return payload;
+      }
+      updateAdaptiveDelay(latency, res.status);
       const message = gmgnErrorText(res.status, payload, `GMGN ${pathname} ${res.status}`);
-      const rateLimited = res.status === 429 || /rate limit|temporarily banned/i.test(String(message));
+      const rateLimited = res.status === 429 || res.status === 503 || /rate limit|temporarily banned/i.test(String(message));
       if (rateLimited && attempt < maxRetries) {
         const retryAfter = Number(res.headers.get('retry-after'));
         const backoffMs = Number.isFinite(retryAfter)

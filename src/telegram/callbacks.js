@@ -1,6 +1,7 @@
 import { bot } from './bot.js';
 import { TELEGRAM_CHAT_ID } from '../config.js';
 import { now } from '../utils.js';
+import { fmtPct } from '../format.js';
 import { numSetting, boolSetting, setSetting, setActiveStrategy, activeStrategy, updateStrategyConfig } from '../db/settings.js';
 import {
   menuKeyboard,
@@ -16,15 +17,17 @@ import {
   sendTpSlDefaults,
   strategyMenuText,
   strategyKeyboard,
+  controlPanelText,
 } from './menus.js';
 import { sendTelegram, sendBatch, sendPositionOpen, sendTradeIntent } from './send.js';
 import { candidateSummary } from './format.js';
 import { candidateById, updateCandidateStatus } from '../db/candidates.js';
 import { storeDecision, logDecisionEvent } from '../db/decisions.js';
 import { createDryRunPosition, canOpenMorePositions, openPositionCount, tradingMode } from '../db/positions.js';
-import { executeLiveBuy, executeConfirmedIntent, rejectIntent } from '../execution/router.js';
+import { executeLiveBuy, executeConfirmedIntent, rejectIntent, manualSell } from '../execution/router.js';
 import { sendCandidate, sendPosition, closePosition, updatePositionRule, toggleTrailing } from './commands.js';
 import { requestNumericFilterInput, requestStrategyNumericInput } from './input.js';
+import { agentState, setState as setAgentState } from '../agentState.js';
 
 export async function handleCallback(query) {
   const data = query.data || '';
@@ -35,6 +38,41 @@ export async function handleCallback(query) {
     pendingNumericInputs.delete(String(chatId));
   }
 
+  if (data === 'agent_stop') {
+    const count = openPositionCount();
+    return editMenuMessage(query, `⚠️ Stop agent? ${count} position(s) open. New signals will be ignored. Existing positions still monitored.\n\nConfirm?`, {
+      reply_markup: { inline_keyboard: [
+        [{ text: '🔴 Yes, Stop', callback_data: 'agent_stop_confirm' }, { text: 'Cancel', callback_data: 'agent_status' }],
+      ]},
+    });
+  }
+  if (data === 'agent_stop_confirm') {
+    setAgentState('stopped', 'Telegram command', query.from?.username || 'user');
+    return editMenuMessage(query, controlPanelText(), menuKeyboard());
+  }
+  if (data === 'agent_pause') {
+    setAgentState('paused', 'Telegram command', query.from?.username || 'user');
+    return editMenuMessage(query, controlPanelText(), menuKeyboard());
+  }
+  if (data === 'agent_resume' || data === 'agent_start') {
+    setAgentState('running', 'Telegram command', query.from?.username || 'user');
+    return editMenuMessage(query, controlPanelText(), menuKeyboard());
+  }
+  if (data === 'agent_status') {
+    return editMenuMessage(query, controlPanelText(), menuKeyboard());
+  }
+  if (data.startsWith('sellpos:')) {
+    const parts = data.split(':');
+    const posId = Number(parts[1]);
+    const pct = Number(parts[2] || 100);
+    try {
+      const result = await manualSell(posId, pct, query.from?.username || 'user');
+      await bot.sendMessage(chatId, `💸 Sold ${pct}% of position #${posId} · PnL ${fmtPct(result.pnl)}`, { parse_mode: 'HTML' });
+    } catch (err) {
+      await bot.sendMessage(chatId, `❌ Sell failed: ${err.message}`);
+    }
+    return null;
+  }
   if (data === 'menu:main') return editMenuMessage(query, mainMenuText(), menuKeyboard());
   if (data === 'noop') return null;
   if (data === 'menu:agent') {

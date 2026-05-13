@@ -1,4 +1,5 @@
 import { escapeHtml, fmtPct, fmtSol, fmtUsd, short, gmgnLink, txLink, accountLink } from '../format.js';
+import { setting } from '../db/settings.js';
 
 export function formatRecipients(shareholders) {
   if (!shareholders?.length) return '';
@@ -96,12 +97,37 @@ export function batchRevealSummary(batchId, rows, decision, triggerCandidateId =
   return lines.filter(Boolean).join('\n');
 }
 
-export function formatPosition(position) {
+export function formatPosition(position, visibilityOverride = null) {
+  const visibility = visibilityOverride || setting('pnl_visibility', 'show_all');
+
+  // hide_history: omit closed positions entirely
+  if (visibility === 'hide_history' && position.status !== 'open') return null;
+
+  // stealth: show only minimal info, no PnL
+  if (visibility === 'stealth') {
+    return [
+      `📍 <b>${escapeHtml(position.symbol || short(position.mint))}</b> #${position.id}`,
+      `Token: <a href="${gmgnLink(position.mint)}">${short(position.mint)}</a>`,
+      `Status: <b>${escapeHtml(position.status)}</b> · Mode: <b>${escapeHtml(position.execution_mode || 'dry_run')}</b>`,
+    ].join('\n');
+  }
+
   const pnl = position.pnl_percent != null
     ? Number(position.pnl_percent)
     : position.entry_mcap && position.high_water_mcap
       ? (Number(position.high_water_mcap) / Number(position.entry_mcap) - 1) * 100
       : 0;
+
+  let lockLine = null;
+  try {
+    const lock = JSON.parse(position.profit_lock_state || '{}');
+    if (lock.tier > 0 || lock.floor_pct != null) {
+      lockLine = `Lock: floor ${lock.floor_pct != null ? fmtPct(lock.floor_pct) : '—'} · high ${lock.high_pnl_pct != null ? fmtPct(lock.high_pnl_pct) : '—'} · tier ${lock.tier || 0}`;
+    }
+  } catch { lockLine = null; }
+
+  const tpDisplay = Number(position.tp_percent) >= 9999 ? 'unlimited' : fmtPct(position.tp_percent);
+
   return [
     `📍 <b>${escapeHtml(position.symbol || short(position.mint))}</b> #${position.id}`,
     `Token: <a href="${gmgnLink(position.mint)}">${short(position.mint)}</a>`,
@@ -109,7 +135,8 @@ export function formatPosition(position) {
     position.entry_signature ? `Entry TX: <a href="${txLink(position.entry_signature)}">${short(position.entry_signature)}</a>` : null,
     `Entry mcap: ${fmtUsd(position.entry_mcap)} · High: ${fmtUsd(position.high_water_mcap)}`,
     `Size: ${fmtSol(position.size_sol)} SOL · PnL: ${fmtPct(pnl)}`,
-    `TP: ${fmtPct(position.tp_percent)} · SL: ${fmtPct(position.sl_percent)} · Trail: ${position.trailing_enabled ? `${fmtPct(position.trailing_percent)}` : 'off'}`,
+    `TP: ${tpDisplay} · SL: ${fmtPct(position.sl_percent)} · Trail: ${position.trailing_enabled ? `${fmtPct(position.trailing_percent)}` : 'off'}`,
+    lockLine,
     position.exit_reason ? `Exit: ${escapeHtml(position.exit_reason)} at ${fmtUsd(position.exit_mcap)} (${fmtPct(position.pnl_percent)})` : null,
     position.exit_signature ? `Exit TX: <a href="${txLink(position.exit_signature)}">${short(position.exit_signature)}</a>` : null,
   ].filter(Boolean).join('\n');
