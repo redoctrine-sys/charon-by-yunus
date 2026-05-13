@@ -30,7 +30,8 @@ setCandidateHandler(processCandidateFromSignals);
 export async function processCandidateFromSignals(signals) {
   // Skip if max positions reached — don't waste enrichment/LLM calls
   if (!canOpenMorePositions()) {
-    const max = numSetting('max_open_positions', 3);
+    const strat = activeStrategy();
+    const max = strat.max_open_positions ?? numSetting('max_open_positions', 3);
     console.log(`[agent] max positions reached (${openPositionCount()}/${max}), skipping ${signals.mint.slice(0, 8)}...`);
     return;
   }

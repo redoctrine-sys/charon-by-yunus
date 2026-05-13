@@ -491,28 +491,24 @@ export function initDb() {
       { trigger: 80, floor: 50 },
     ],
     profit_lock_dynamic_buffer: 30,
-    // LLM receives this hint so it applies age-aware entry logic and volume spike checks
+    // LLM receives this hint so it applies age-aware entry logic and confidence metrics
     llm_strategy_hint: [
       'STRATEGY: Sniper Lock (adaptive entry + profit-lock exit).',
-      'If token age < 1 hour: require fee claim evidence and 2+ signals, entry is aggressive.',
-      'If token age > 1 hour: ALL of these must pass — (1) a clear volume spike within the last 5 minutes; (2) current price is near or below the average buy price of the Top 10 holders; (3) Stochastic RSI on 1m TF is BELOW 20 (extreme oversold). Smart Money wallet or KOL entry adds confidence but is not mandatory.',
-      'EXIT is handled purely by Profit Lock tiers — never use a fixed TP. Override tiers and return PASS if: Smart Money wallets are dumping simultaneously, or price repeatedly fails to break Supertrend resistance.',
+      'Each candidate includes a "sniper_lock_signals" field with pre-computed confidence signals — use them.',
+      'ENTRY MODE: Check sniper_lock_signals.entry_mode.',
+      '  - FRESH (age <60min): require fee_claim evidence, 2+ signals. Entry is aggressive.',
+      '  - CONSOLIDATION (age >60min): require sniper_lock_signals.volume_spike.is_spike=true. Reject if no spike.',
+      'CONFIDENCE BOOSTERS (raise your confidence score when present):',
+      '  1. volume_spike.spike_ratio >= 2.0 and is_spike=true: strong buy momentum, add +15 confidence.',
+      '  2. top10_concentration.concentration_risk=LOW (top10 hold < 35%): low dump risk, add +10 confidence.',
+      '  3. stoch_rsi_proxy.oversold_proxy=true: price near 24h low, likely bouncing, add +10 confidence.',
+      '  4. smart_wallet.has_smart_money=true: validated smart wallet/KOL entry confirmed, add +15 confidence.',
+      'CONFIDENCE PENALTIES (lower your score):',
+      '  - top10_concentration.concentration_risk=HIGH (> 60%): high dump risk, subtract -20 confidence.',
+      '  - volume_spike.spike_ratio < 1.0 in CONSOLIDATION mode: no real momentum, penalize heavily.',
+      'EXIT: Profit Lock tiers handle exit — do NOT set TP. Override to PASS if smart_wallet shows dumps.',
     ].join(' '),
   }), ts);
-
-  // Force-update sniper_lock hint so existing databases pick up the latest rules on restart
-  (() => {
-    const existing = db.prepare("SELECT config_json FROM strategies WHERE id = 'sniper_lock'").get();
-    if (!existing) return;
-    const cfg = JSON.parse(existing.config_json);
-    cfg.llm_strategy_hint = [
-      'STRATEGY: Sniper Lock (adaptive entry + profit-lock exit).',
-      'If token age < 1 hour: require fee claim evidence and 2+ signals, entry is aggressive.',
-      'If token age > 1 hour: ALL of these must pass — (1) a clear volume spike within the last 5 minutes; (2) current price is near or below the average buy price of the Top 10 holders; (3) Stochastic RSI on 1m TF is BELOW 20 (extreme oversold). Smart Money wallet or KOL entry adds confidence but is not mandatory.',
-      'EXIT is handled purely by Profit Lock tiers — never use a fixed TP. Override tiers and return PASS if: Smart Money wallets are dumping simultaneously, or price repeatedly fails to break Supertrend resistance.',
-    ].join(' ');
-    db.prepare("UPDATE strategies SET config_json = ? WHERE id = 'sniper_lock'").run(JSON.stringify(cfg));
-  })();
 }
 
 export function ensureColumn(table, column, ddl) {

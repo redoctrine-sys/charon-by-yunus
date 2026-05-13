@@ -29,6 +29,92 @@ export function activeLessonsForPrompt(limit = 6) {
   `).all(limit).map(row => row.lesson);
 }
 
+/**
+ * Compute the 4 Sniper Lock confidence signals from raw candidate data.
+ * All signals are informational only — the LLM decides how to weight them.
+ */
+export function computeSniperLockMetrics(c) {
+  // --- 1. Volume Spike (last candle vs average of earlier candles in 5m window) ---
+  let volumeSpike = null;
+  try {
+    const candles = c.chart?.windows?.find(w => w.label === 'ath_context_24h_5m')?.candles ?? [];
+    // We don't have individual candle data in the summarized window, so use the trending stats
+    // instead: compare 5m volume to 1h volume as a spike signal
+    const vol5m = Number(c.trending?.stats5m?.buyVolume ?? 0) + Number(c.trending?.stats5m?.sellVolume ?? 0);
+    const vol1h = Number(c.trending?.stats1h?.buyVolume ?? 0) + Number(c.trending?.stats1h?.sellVolume ?? 0);
+    const avgPer5m = vol1h > 0 ? vol1h / 12 : null;  // 12 x 5min = 1h
+    if (vol5m > 0 && avgPer5m !== null && avgPer5m > 0) {
+      const ratio = vol5m / avgPer5m;
+      volumeSpike = {
+        vol5m_usd: Math.round(vol5m),
+        avg_per_5m_usd: Math.round(avgPer5m),
+        spike_ratio: Math.round(ratio * 100) / 100,
+        is_spike: ratio >= 2.0,  // 2x average = meaningful spike
+      };
+    }
+  } catch { /* non-blocking */ }
+
+  // --- 2. Top 10 Buyer Average (holders sorted by amount, average of top 10) ---
+  let top10BuyerAvg = null;
+  try {
+    const top10 = (c.holders?.top20 ?? []).slice(0, 10);
+    if (top10.length > 0) {
+      const avgPct = top10.reduce((sum, h) => sum + Number(h.percent || 0), 0) / top10.length;
+      const top10TotalPct = top10.reduce((sum, h) => sum + Number(h.percent || 0), 0);
+      // We don't have individual avg buy prices from Jupiter holders API (it only gives balances).
+      // Report concentration instead, which the LLM can use as a proxy for risk.
+      top10BuyerAvg = {
+        holder_count: top10.length,
+        avg_holding_pct: Math.round(avgPct * 100) / 100,
+        top10_total_pct: Math.round(top10TotalPct * 100) / 100,
+        // If top 10 hold > 60%, entry is risky (high distribution risk)
+        concentration_risk: top10TotalPct > 60 ? 'HIGH' : top10TotalPct > 35 ? 'MEDIUM' : 'LOW',
+      };
+    }
+  } catch { /* non-blocking */ }
+
+  // --- 3. Stochastic RSI approximation (1m TF data not fetched; use 5m candle window summary) ---
+  // Note: True Stoch RSI requires individual candle closes. The summarized windows don't carry
+  // raw candles. We report the available ATH distance as a proxy for overbought/oversold signal.
+  let stochRsiProxy = null;
+  try {
+    const athWindow = c.chart?.windows?.find(w => w.label === 'ath_context_24h_5m' && w.available);
+    if (athWindow) {
+      const distFromHigh = Number(athWindow.belowHighPercent ?? athWindow.distanceFromHighPercent ?? 0);
+      const aboveLow = Number(athWindow.aboveLowPercent ?? 0);
+      // Rough oversold heuristic: price is far below 24h high AND close to 24h low
+      const isOversoldProxy = distFromHigh < -40 && aboveLow < 20;
+      stochRsiProxy = {
+        source: '5m_ath_window_proxy',
+        dist_from_24h_high_pct: Math.round(distFromHigh * 100) / 100,
+        above_24h_low_pct: Math.round(aboveLow * 100) / 100,
+        oversold_proxy: isOversoldProxy,
+        note: 'True Stoch RSI 1m requires raw candle data; this is a structural proxy.',
+      };
+    }
+  } catch { /* non-blocking */ }
+
+  // --- 4. Smart Wallet / KOL exposure (already available) ---
+  const smartWallet = {
+    holder_count: Number(c.savedWalletExposure?.holderCount ?? 0),
+    wallets: c.savedWalletExposure?.wallets ?? [],
+    has_smart_money: Number(c.savedWalletExposure?.holderCount ?? 0) > 0,
+  };
+
+  // --- Token age (key for mode switching) ---
+  const ageMs = c.createdAtMs ? Date.now() - Number(c.createdAtMs) : null;
+  const ageMins = ageMs !== null ? Math.round(ageMs / 60000) : null;
+
+  return {
+    token_age_mins: ageMins,
+    entry_mode: ageMins !== null ? (ageMins < 60 ? 'FRESH' : 'CONSOLIDATION') : 'UNKNOWN',
+    volume_spike: volumeSpike,
+    top10_concentration: top10BuyerAvg,
+    stoch_rsi_proxy: stochRsiProxy,
+    smart_wallet: smartWallet,
+  };
+}
+
 export function compactCandidateForLlm(row) {
   const c = row.candidate;
   const athWindow = c.chart?.windows?.find(window => window.label === 'ath_context_24h_5m' && window.available)
@@ -62,6 +148,8 @@ export function compactCandidateForLlm(row) {
     savedWalletExposure: c.savedWalletExposure,
     twitterNarrative: c.twitterNarrative,
     filters: c.filters,
+    // Sniper Lock confidence signals — always computed, LLM ignores if strategy doesn't use them
+    sniper_lock_signals: computeSniperLockMetrics(c),
   };
 }
 
