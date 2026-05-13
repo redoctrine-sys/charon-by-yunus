@@ -495,10 +495,24 @@ export function initDb() {
     llm_strategy_hint: [
       'STRATEGY: Sniper Lock (adaptive entry + profit-lock exit).',
       'If token age < 1 hour: require fee claim evidence and 2+ signals, entry is aggressive.',
-      'If token age > 1 hour: require a clear volume spike within the last 5 minutes AND at least one of: Smart Money/KOL wallet entry, Stoch RSI oversold on 1m TF, price approaching Supertrend breakout.',
-      'Exit is handled by Profit Lock tiers — do NOT use TP. If Smart Money is dumping or price fails Supertrend repeatedly, override tiers and flag as PASS.',
+      'If token age > 1 hour: ALL of these must pass — (1) a clear volume spike within the last 5 minutes; (2) current price is near or below the average buy price of the Top 10 holders; (3) Stochastic RSI on 1m TF is BELOW 20 (extreme oversold). Smart Money wallet or KOL entry adds confidence but is not mandatory.',
+      'EXIT is handled purely by Profit Lock tiers — never use a fixed TP. Override tiers and return PASS if: Smart Money wallets are dumping simultaneously, or price repeatedly fails to break Supertrend resistance.',
     ].join(' '),
   }), ts);
+
+  // Force-update sniper_lock hint so existing databases pick up the latest rules on restart
+  (() => {
+    const existing = db.prepare("SELECT config_json FROM strategies WHERE id = 'sniper_lock'").get();
+    if (!existing) return;
+    const cfg = JSON.parse(existing.config_json);
+    cfg.llm_strategy_hint = [
+      'STRATEGY: Sniper Lock (adaptive entry + profit-lock exit).',
+      'If token age < 1 hour: require fee claim evidence and 2+ signals, entry is aggressive.',
+      'If token age > 1 hour: ALL of these must pass — (1) a clear volume spike within the last 5 minutes; (2) current price is near or below the average buy price of the Top 10 holders; (3) Stochastic RSI on 1m TF is BELOW 20 (extreme oversold). Smart Money wallet or KOL entry adds confidence but is not mandatory.',
+      'EXIT is handled purely by Profit Lock tiers — never use a fixed TP. Override tiers and return PASS if: Smart Money wallets are dumping simultaneously, or price repeatedly fails to break Supertrend resistance.',
+    ].join(' ');
+    db.prepare("UPDATE strategies SET config_json = ? WHERE id = 'sniper_lock'").run(JSON.stringify(cfg));
+  })();
 }
 
 export function ensureColumn(table, column, ddl) {
