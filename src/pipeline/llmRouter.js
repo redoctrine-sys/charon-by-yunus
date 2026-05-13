@@ -57,9 +57,11 @@ export function currentWindowCost() {
 // ---------------------------------------------------------------------------
 // Core HTTP call for a single tier
 // ---------------------------------------------------------------------------
-async function callTier(messages, tier) {
+async function callTier(messages, tier, maxTokensOverride) {
   const model = MODELS[tier];
   if (!model) throw new Error(`[llmRouter] Unknown tier: ${tier}`);
+
+  const maxTokens = maxTokensOverride ?? Number(process.env.LLM_MAX_TOKENS || 2500);
 
   let res;
   try {
@@ -69,7 +71,7 @@ async function callTier(messages, tier) {
         model,
         messages,
         temperature: 0.2,
-        max_tokens: Number(process.env.LLM_MAX_TOKENS || 1500),
+        max_tokens: maxTokens,
       },
       {
         timeout: LLM_TIMEOUT_MS,
@@ -95,6 +97,12 @@ async function callTier(messages, tier) {
   if (!Array.isArray(data?.choices) || data.choices.length === 0) {
     const snippet = JSON.stringify(data)?.slice(0, 200) || '(empty body)';
     throw new Error(`No choices in response (${tier}): ${snippet}`);
+  }
+
+  // Warn if truncated
+  const finishReason = data.choices[0]?.finish_reason;
+  if (finishReason === 'length') {
+    console.log(`[llmRouter] warning: ${tier} response truncated (finish_reason=length, max_tokens=${maxTokens}). Consider raising LLM_MAX_TOKENS.`);
   }
 
   // Track estimated cost
@@ -237,8 +245,11 @@ export async function decideCandidateBatchRouted(rows, triggerCandidateId) {
   const analyzeThreshold = Number(process.env.LLM_ANALYZE_CONFIDENCE_THRESHOLD || 60);
 
   try {
-    // ── Tier 1: screen ───────────────────────────────────────────────────
-    const t1Raw = await callTier(messages, 'screen');
+    // ── Tier 1: screen — use a small token budget (only needs confidence)
+    // For tier 1, we use 800 tokens max since we only read the confidence field.
+    // The full analysis is done in tier 2 if escalation is needed.
+    const screenMaxTokens = Number(process.env.LLM_SCREEN_MAX_TOKENS || 800);
+    const t1Raw = await callTier(messages, 'screen', screenMaxTokens);
     const t1Confidence = extractConfidence(t1Raw);
     console.log(`[llmRouter] tier=screen model=${t1Raw._model} confidence=${t1Confidence} budget=$${BUDGET.windowCost.toFixed(4)}`);
 
@@ -246,7 +257,7 @@ export async function decideCandidateBatchRouted(rows, triggerCandidateId) {
       return parseBatchResponse(t1Raw, rows);
     }
 
-    // ── Tier 2: analyze ─────────────────────────────────────────────────
+    // ── Tier 2: analyze — use full token budget
     if (!checkBudget()) {
       console.log('[llmRouter] budget exhausted before tier 2 escalation, using tier 1 result.');
       return parseBatchResponse(t1Raw, rows);
