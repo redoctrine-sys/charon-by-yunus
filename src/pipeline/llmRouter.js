@@ -164,9 +164,11 @@ function buildBatchMessages(rows, triggerCandidateId) {
 // Parse a raw API response into a normalised batch decision
 // ---------------------------------------------------------------------------
 function parseBatchResponse(rawResponse, rows) {
-  const content = rawResponse?.choices?.[0]?.message?.content || '';
+  const choice = rawResponse?.choices?.[0];
+  const content = choice?.message?.content || '';
   if (!content.trim()) {
-    throw new Error('LLM returned an empty response content');
+    const reason = choice?.finish_reason || 'unknown';
+    throw new Error(`LLM returned an empty response content (finish_reason: ${reason})`);
   }
   const stripped = stripThinking(content);
   const parsed = strictJsonFromText(stripped);
