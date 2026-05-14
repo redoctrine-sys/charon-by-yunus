@@ -253,7 +253,7 @@ export function initDb() {
   const defaults = {
     agent_enabled: 'true',
     trading_mode: process.env.TRADING_MODE || 'dry_run',
-    llm_candidate_pick_count: process.env.LLM_CANDIDATE_PICK_COUNT || '10',
+    llm_candidate_pick_count: process.env.LLM_CANDIDATE_PICK_COUNT || '5',
     llm_candidate_max_age_ms: process.env.LLM_CANDIDATE_MAX_AGE_MS || String(10 * 60 * 1000),
     llm_min_confidence: '75',
     max_open_positions: process.env.MAX_OPEN_POSITIONS || '3',

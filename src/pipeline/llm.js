@@ -171,7 +171,7 @@ export async function decideCandidateBatch(rows, triggerCandidateId) {
   const system = [
     'You are Charon, a Solana meme coin trench analyst.',
     'Return strict JSON only.',
-    'You will receive up to 10 recently matched candidates.',
+    'You will receive up to 5 recently matched candidates.',
     'Pick at most one candidate to buy through the configured execution mode.',
     'Use verdict BUY only for the single best unusually strong asymmetric opportunity.',
     'Use WATCH if candidates are interesting but none deserves a buy.',
