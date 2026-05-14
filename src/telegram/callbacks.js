@@ -25,7 +25,7 @@ import { candidateById, updateCandidateStatus } from '../db/candidates.js';
 import { storeDecision, logDecisionEvent } from '../db/decisions.js';
 import { createDryRunPosition, canOpenMorePositions, openPositionCount, tradingMode } from '../db/positions.js';
 import { executeLiveBuy, executeConfirmedIntent, rejectIntent, manualSell } from '../execution/router.js';
-import { sendCandidate, sendPosition, closePosition, updatePositionRule, toggleTrailing } from './commands.js';
+import { sendCandidate, sendPosition, closePosition, updatePositionRule, toggleTrailing, sendPnl } from './commands.js';
 import { requestNumericFilterInput, requestStrategyNumericInput } from './input.js';
 import { agentState, setState as setAgentState } from '../agentState.js';
 
@@ -92,7 +92,6 @@ export async function handleCallback(query) {
   if (data === 'menu:wallets') return editMenuMessage(query, walletsText(), navKeyboard());
   if (data === 'menu:positions') return editMenuMessage(query, positionsText(), navKeyboard());
   if (data === 'menu:pnl') {
-    const { sendPnl } = await import('./commands.js');
     return sendPnl(chatId, query);
   }
   if (data === 'menu:settings') return editMenuMessage(query, `${agentText()}\n\n${filtersText()}`, navKeyboard([

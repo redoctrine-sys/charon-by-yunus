@@ -44,6 +44,67 @@ export function allPositions(limit = 10) {
   return db.prepare('SELECT * FROM dry_run_positions ORDER BY id DESC LIMIT ?').all(limit);
 }
 
+export function positionStats({ windowMs = null, strategyId = null } = {}) {
+  const conditions = ["status = 'closed'"];
+  const params = [];
+  if (windowMs) { conditions.push('closed_at_ms >= ?'); params.push(Date.now() - windowMs); }
+  if (strategyId) { conditions.push('strategy_id = ?'); params.push(strategyId); }
+  const where = conditions.join(' AND ');
+
+  const closed = db.prepare(`SELECT * FROM dry_run_positions WHERE ${where}`).all(...params);
+  const open = db.prepare('SELECT * FROM dry_run_positions WHERE status = ?').all('open');
+
+  if (!closed.length) {
+    return {
+      total: 0, open: open.length, wins: 0, losses: 0, winRate: 0,
+      totalPnlPct: 0, avgPnlPct: 0, totalPnlSol: 0,
+      bestPnlPct: null, worstPnlPct: null,
+      avgHoldMs: null, byExitReason: {}, byStrategy: {},
+    };
+  }
+
+  let wins = 0, totalPnlPct = 0, totalPnlSol = 0, totalHoldMs = 0, holdCount = 0;
+  let bestPnlPct = -Infinity, worstPnlPct = Infinity;
+  const byExitReason = {};
+  const byStrategy = {};
+
+  for (const p of closed) {
+    const pnl = Number(p.pnl_percent ?? 0);
+    const pnlSol = Number(p.pnl_sol ?? 0);
+    if (pnl > 0) wins++;
+    totalPnlPct += pnl;
+    totalPnlSol += pnlSol;
+    if (pnl > bestPnlPct) bestPnlPct = pnl;
+    if (pnl < worstPnlPct) worstPnlPct = pnl;
+    const holdMs = p.closed_at_ms && p.opened_at_ms ? Number(p.closed_at_ms) - Number(p.opened_at_ms) : null;
+    if (holdMs != null) { totalHoldMs += holdMs; holdCount++; }
+    const reason = p.exit_reason || 'unknown';
+    byExitReason[reason] = (byExitReason[reason] || 0) + 1;
+    const strat = p.strategy_id || 'unknown';
+    if (!byStrategy[strat]) byStrategy[strat] = { total: 0, wins: 0, pnlPct: 0, pnlSol: 0 };
+    byStrategy[strat].total++;
+    if (pnl > 0) byStrategy[strat].wins++;
+    byStrategy[strat].pnlPct += pnl;
+    byStrategy[strat].pnlSol += pnlSol;
+  }
+
+  return {
+    total: closed.length,
+    open: open.length,
+    wins,
+    losses: closed.length - wins,
+    winRate: closed.length ? (wins / closed.length) * 100 : 0,
+    totalPnlPct,
+    avgPnlPct: closed.length ? totalPnlPct / closed.length : 0,
+    totalPnlSol,
+    bestPnlPct: bestPnlPct === -Infinity ? null : bestPnlPct,
+    worstPnlPct: worstPnlPct === Infinity ? null : worstPnlPct,
+    avgHoldMs: holdCount ? totalHoldMs / holdCount : null,
+    byExitReason,
+    byStrategy,
+  };
+}
+
 export function createDryRunPosition(candidateId, candidate, decision, reason = 'llm_buy') {
   const strat = activeStrategy();
   const sizeSol = strat.position_size_sol ?? numSetting('dry_run_buy_sol', 0.1);

@@ -27,11 +27,10 @@ import { sendTelegram, sendBatch, sendPositionOpen } from './send.js';
 import { candidateSummary, formatPosition } from './format.js';
 import { refreshPosition } from '../execution/positions.js';
 import { executeLiveSell } from '../execution/router.js';
-import { openPositionCount } from '../db/positions.js';
+import { openPositionCount, positionStats } from '../db/positions.js';
 import { handleCallback, editMenuMessage } from './callbacks.js';
 import { consumeNumericFilterInput } from './input.js';
 import { runLearning, sendLessons } from '../learning/commands.js';
-import { fetchWalletPnl } from '../enrichment/wallets.js';
 
 export async function handleMessage(msg) {
   const text = (msg.text || '').trim();
@@ -339,27 +338,68 @@ async function sendMenu(chatId = TELEGRAM_CHAT_ID) {
   });
 }
 
-async function sendPnl(chatId, query = null) {
-  const wallets = savedWallets();
-  if (!wallets.length) {
-    const text = '📊 <b>PnL</b>\n\nNo saved wallets. Use /walletadd &lt;label&gt; &lt;address&gt;.';
-    return query ? editMenuMessage(query, text, navKeyboard()) : bot.sendMessage(chatId, text, { parse_mode: 'HTML' });
+function formatHoldMs(ms) {
+  if (ms == null) return '—';
+  const m = Math.round(ms / 60000);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  const rem = m % 60;
+  return rem > 0 ? `${h}h ${rem}m` : `${h}h`;
+}
+
+export async function sendPnl(chatId, query = null) {
+  const all = positionStats();
+  const d24h = positionStats({ windowMs: 24 * 60 * 60 * 1000 });
+  const d7d = positionStats({ windowMs: 7 * 24 * 60 * 60 * 1000 });
+
+  const lines = [
+    '📊 <b>Charon PnL Report</b>',
+    '',
+    `Open positions: <b>${all.open}</b>`,
+    '',
+    '⬛ <b>All time</b>',
+    `Trades: ${all.total} · Wins: ${all.wins} · Losses: ${all.losses}`,
+    all.total ? `Win rate: <b>${fmtPct(all.winRate)}</b> · Avg PnL: <b>${fmtPct(all.avgPnlPct)}</b>` : 'No closed trades yet.',
+    all.total ? `Total PnL: <b>${all.totalPnlSol >= 0 ? '+' : ''}${all.totalPnlSol.toFixed(4)} SOL</b>` : null,
+    all.bestPnlPct != null ? `Best: +${fmtPct(all.bestPnlPct)} · Worst: ${fmtPct(all.worstPnlPct)}` : null,
+    all.avgHoldMs != null ? `Avg hold: ${formatHoldMs(all.avgHoldMs)}` : null,
+  ];
+
+  if (d24h.total > 0) {
+    lines.push('', '🕐 <b>Last 24h</b>');
+    lines.push(`Trades: ${d24h.total} · Win rate: ${fmtPct(d24h.winRate)} · Avg: ${fmtPct(d24h.avgPnlPct)}`);
+    lines.push(`PnL: ${d24h.totalPnlSol >= 0 ? '+' : ''}${d24h.totalPnlSol.toFixed(4)} SOL`);
   }
-  const chunks = [];
-  for (const wallet of wallets) {
-    const pnl = await fetchWalletPnl(wallet.address).catch(() => null);
-    if (!pnl) {
-      chunks.push(`• <b>${escapeHtml(wallet.label)}</b>: no data`);
-      continue;
+
+  if (d7d.total > 0 && d7d.total !== d24h.total) {
+    lines.push('', '📅 <b>Last 7d</b>');
+    lines.push(`Trades: ${d7d.total} · Win rate: ${fmtPct(d7d.winRate)} · Avg: ${fmtPct(d7d.avgPnlPct)}`);
+    lines.push(`PnL: ${d7d.totalPnlSol >= 0 ? '+' : ''}${d7d.totalPnlSol.toFixed(4)} SOL`);
+  }
+
+  // Exit reason breakdown
+  if (all.total > 0) {
+    const reasons = Object.entries(all.byExitReason).sort((a, b) => b[1] - a[1]);
+    if (reasons.length) {
+      lines.push('', '🚪 <b>Exit reasons</b>');
+      lines.push(reasons.map(([r, n]) => `${escapeHtml(r)}: ${n}`).join(' · '));
     }
-    chunks.push([
-      `• <b>${escapeHtml(wallet.label)}</b>`,
-      `Win: ${fmtPct(pnl.winRate)} · PnL: ${fmtPct(pnl.totalPnlPercent)}`,
-      `Trades: ${pnl.totalTrades} · Wins: ${pnl.wins}`,
-    ].join('\n'));
   }
-  const text = `📊 <b>PnL</b>\n\n${chunks.join('\n\n')}`;
-  return query ? editMenuMessage(query, text, navKeyboard()) : bot.sendMessage(chatId, text, { parse_mode: 'HTML' });
+
+  // Per-strategy breakdown
+  const stratEntries = Object.entries(all.byStrategy).sort((a, b) => b[1].total - a[1].total);
+  if (stratEntries.length > 1) {
+    lines.push('', '🎯 <b>By strategy</b>');
+    for (const [strat, s] of stratEntries) {
+      const wr = s.total ? (s.wins / s.total * 100) : 0;
+      lines.push(`${escapeHtml(strat)}: ${s.total} trades · ${fmtPct(wr)} WR · ${s.pnlSol >= 0 ? '+' : ''}${s.pnlSol.toFixed(4)} SOL`);
+    }
+  }
+
+  const text = lines.filter(l => l != null).join('\n');
+  return query
+    ? editMenuMessage(query, text, navKeyboard())
+    : bot.sendMessage(chatId, text, { parse_mode: 'HTML', disable_web_page_preview: true });
 }
 
 function parseSetFilter(text) {
