@@ -4,6 +4,7 @@ import { fetchGmgnTokenInfo } from '../enrichment/gmgn.js';
 import { fetchJupiterAsset, fetchJupiterHolders, fetchJupiterChartContext } from '../enrichment/jupiter.js';
 import { fetchSavedWalletExposure } from '../enrichment/wallets.js';
 import { fetchTwitterNarrative } from '../enrichment/twitter.js';
+import { computeVennSignals, vennFilterFailures } from '../enrichment/vennCheck.js';
 import { gmgnLink } from '../format.js';
 
 export function buildFeeSnapshot(fee, signature) {
@@ -110,6 +111,12 @@ export function filterCandidate(candidate) {
     if (candidate.trending.is_wash_trading === true || candidate.trending.is_wash_trading === 1) {
       failures.push('trending wash trading');
     }
+  }
+
+  // Venn Lock strategy: additional Venn Irisan filters using available data
+  if (strat.id === 'venn_lock') {
+    const { failures: vennFailures } = vennFilterFailures(candidate, strat);
+    failures.push(...vennFailures);
   }
 
   return { passed: failures.length === 0, failures, strategy: strat.id };

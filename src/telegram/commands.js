@@ -4,6 +4,7 @@ import { now, json } from '../utils.js';
 import { escapeHtml, fmtPct, fmtSol } from '../format.js';
 import { db } from '../db/connection.js';
 import { numSetting, boolSetting, setSetting, activeStrategy, setActiveStrategy, strategyById, updateStrategyConfig } from '../db/settings.js';
+import { computeVennSignals } from '../enrichment/vennCheck.js';
 import { agentState, setState as setAgentState } from '../agentState.js';
 import { manualSell, sellAll } from '../execution/router.js';
 import { candidateById, latestCandidateByMint, updateCandidateStatus } from '../db/candidates.js';
@@ -46,7 +47,7 @@ export async function handleMessage(msg) {
     if (!id) {
       return bot.sendMessage(chatId, strategyMenuText(), { parse_mode: 'HTML', ...strategyKeyboard() });
     }
-    const valid = ['sniper', 'dip_buy', 'smart_money', 'degen', 'profit_lock'];
+    const valid = ['sniper', 'dip_buy', 'smart_money', 'degen', 'profit_lock', 'venn_lock', 'sniper_lock'];
     if (!valid.includes(id)) {
       return bot.sendMessage(chatId, `Unknown strategy. Valid: ${valid.join(', ')}`);
     }
@@ -78,6 +79,7 @@ export async function handleMessage(msg) {
     return bot.sendMessage(chatId, `Updated ${id}.${key} = ${value}\n\n${strategyMenuText()}`, { parse_mode: 'HTML' });
   }
   if (text.startsWith('/pnl')) return sendPnl(chatId);
+  if (text.startsWith('/venn')) return handleVennCommand(chatId, text);
   if (text.startsWith('/learn')) {
     const windowArg = text.split(/\s+/)[1] || '12h';
     return runLearning(chatId, windowArg);
@@ -413,4 +415,96 @@ function allPositions(limit = 10) {
 
 function savedWallets() {
   return db.prepare('SELECT * FROM saved_wallets ORDER BY label').all();
+}
+
+async function handleVennCommand(chatId, text) {
+  const parts = text.trim().split(/\s+/);
+  const sub = parts[1] || 'help';
+
+  // /venn score <mint>
+  if (sub === 'score') {
+    const mint = parts[2];
+    if (!mint) return bot.sendMessage(chatId, 'Usage: /venn score <mint>');
+    const { latestCandidateByMint } = await import('../db/candidates.js');
+    const row = latestCandidateByMint(mint);
+    if (!row) return bot.sendMessage(chatId, `No candidate found for mint ${escapeHtml(mint.slice(0, 16))}...`);
+    const strat = strategyById('venn_lock') || activeStrategy();
+    const signals = computeVennSignals(row.candidate, strat);
+    const checkLine = (label, ok, detail = '') => {
+      const icon = ok === true ? '✅' : ok === false ? '❌' : '⚪';
+      return `${icon} ${label}${detail ? ` ${detail}` : ''}`;
+    };
+    const lines = [
+      `🔬 <b>Venn Score: ${escapeHtml(row.candidate.token.symbol || mint.slice(0, 8))}</b>`,
+      `Entry mode: <b>${signals.entry_mode}</b> · Age: ${signals.token_age_mins ?? '?'}m`,
+      '',
+      checkLine('Social', signals.social.ok, signals.social.ok ? '(Twitter/TG/Web found)' : '(none found)'),
+      checkLine('Bundle', signals.bundle.ok, `${signals.bundle.percent.toFixed(0)}% (max ${signals.bundle.max}%)`),
+      checkLine('Volume 3x', signals.volume_spike.ok, signals.volume_spike.ratio != null ? `ratio ${signals.volume_spike.ratio}x` : 'no data'),
+      signals.entry_mode === 'FRESH' ? checkLine('Fresh dump -60%', signals.fresh_dump.ok, `ATH dist ${signals.fresh_dump.ath_dist_pct?.toFixed(0) ?? '?'}%`) : null,
+      signals.entry_mode === 'SLEEPER' ? checkLine('Fib 0.786 proxy', signals.fibonacci_proxy.ok, `ATH dist ${signals.fibonacci_proxy.ath_dist_pct?.toFixed(0) ?? '?'}%`) : null,
+      checkLine('Narrative', signals.narrative.ok),
+      checkLine('Holder conc.', signals.holder_concentration.ok, `max ${signals.holder_concentration.max_holder_pct?.toFixed(1)}% (lim ${signals.holder_concentration.threshold}%)`),
+      checkLine('Dev analysis', null, '⚪ N/A (ext API)'),
+      checkLine('Global fee', null, '⚪ N/A (ext API)'),
+      checkLine('Revoke', null, '⚪ N/A (ext API)'),
+      checkLine('Deepnets', null, '⚪ N/A (ext API)'),
+    ];
+    return bot.sendMessage(chatId, lines.filter(Boolean).join('\n'), { parse_mode: 'HTML' });
+  }
+
+  // /venn stats
+  if (sub === 'stats') {
+    const vennStats = positionStats({ strategyId: 'venn_lock' });
+    const lines = [
+      '🔬 <b>Venn Lock Stats</b>',
+      '',
+      `Closed: ${vennStats.total} · Open: ${vennStats.open}`,
+      vennStats.total ? `Win rate: <b>${fmtPct(vennStats.winRate)}</b> · Avg: <b>${fmtPct(vennStats.avgPnlPct)}</b>` : 'No closed trades yet.',
+      vennStats.total ? `PnL: <b>${vennStats.totalPnlSol >= 0 ? '+' : ''}${vennStats.totalPnlSol.toFixed(4)} SOL</b>` : null,
+      vennStats.bestPnlPct != null ? `Best: +${fmtPct(vennStats.bestPnlPct)} · Worst: ${fmtPct(vennStats.worstPnlPct)}` : null,
+      vennStats.avgHoldMs != null ? `Avg hold: ${formatHoldMs(vennStats.avgHoldMs)}` : null,
+    ];
+    if (vennStats.total > 0) {
+      const reasons = Object.entries(vennStats.byExitReason).sort((a, b) => b[1] - a[1]);
+      if (reasons.length) {
+        lines.push('', '<b>Exit reasons:</b>');
+        lines.push(reasons.map(([r, n]) => `${escapeHtml(r)}: ${n}`).join(' · '));
+      }
+    }
+    return bot.sendMessage(chatId, lines.filter(Boolean).join('\n'), { parse_mode: 'HTML' });
+  }
+
+  // /venn missed — candidates rejected by venn filters
+  if (sub === 'missed') {
+    const rows = db.prepare(`
+      SELECT c.id, c.mint, c.created_at_ms, c.filter_result_json
+      FROM candidates c
+      WHERE c.filter_result_json LIKE '%venn:%'
+        AND c.status IN ('filtered', 'new')
+      ORDER BY c.created_at_ms DESC
+      LIMIT 20
+    `).all();
+    if (!rows.length) return bot.sendMessage(chatId, 'No candidates rejected by Venn filters recently.');
+    const lines = ['🔬 <b>Venn Missed (last 20)</b>', ''];
+    for (const row of rows) {
+      let filterResult = {};
+      try { filterResult = JSON.parse(row.filter_result_json); } catch { /* */ }
+      const vennFails = (filterResult.failures || []).filter(f => f.startsWith('venn:'));
+      const ageM = Math.round((Date.now() - Number(row.created_at_ms)) / 60000);
+      lines.push(`<code>${row.mint.slice(0, 12)}...</code> (${ageM}m ago)\n  ${vennFails.map(escapeHtml).join(', ') || 'venn filter'}`);
+    }
+    return bot.sendMessage(chatId, lines.join('\n'), { parse_mode: 'HTML' });
+  }
+
+  // /venn help
+  const helpLines = [
+    '🔬 <b>Venn Lock Commands</b>',
+    '',
+    '/strategy venn_lock — Switch to Venn Lock strategy',
+    '/venn score &lt;mint&gt; — Check Venn score for any token',
+    '/venn stats — Venn Lock performance stats',
+    '/venn missed — Tokens rejected by Venn filters',
+  ];
+  return bot.sendMessage(chatId, helpLines.join('\n'), { parse_mode: 'HTML' });
 }

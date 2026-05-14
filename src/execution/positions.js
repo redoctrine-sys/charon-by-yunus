@@ -159,7 +159,7 @@ async function checkPartialTpLadder(position, pnlPercent, price, mcap) {
     if (executed.includes(tier.trigger)) continue;
     if (pnlPercent < tier.trigger) continue;
 
-    const pct = tier.sell_percent || 50;
+    const pct = tier.sell_percent ?? tier.sell_pct ?? 50;
     console.log(`[position] ${position.id} partial TP ladder tier @${tier.trigger}% sell ${pct}%`);
 
     if (position.execution_mode === 'live' && position.token_amount_raw) {

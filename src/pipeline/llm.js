@@ -1,8 +1,9 @@
 import axios from 'axios';
 import { ENABLE_LLM, LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, LLM_TIMEOUT_MS } from '../config.js';
 import { now, stripThinking, strictJsonFromText } from '../utils.js';
-import { numSetting } from '../db/settings.js';
+import { numSetting, activeStrategy } from '../db/settings.js';
 import { db } from '../db/connection.js';
+import { computeVennSignals } from '../enrichment/vennCheck.js';
 
 export function normalizeDecision(parsed, fallbackReason = '') {
   const verdict = ['BUY', 'WATCH', 'PASS'].includes(String(parsed?.verdict).toUpperCase())
@@ -150,6 +151,8 @@ export function compactCandidateForLlm(row) {
     filters: c.filters,
     // Sniper Lock confidence signals — always computed, LLM ignores if strategy doesn't use them
     sniper_lock_signals: computeSniperLockMetrics(c),
+    // Venn Lock signals — only injected when venn_lock strategy is active
+    venn_signals: activeStrategy()?.id === 'venn_lock' ? computeVennSignals(c, activeStrategy()) : undefined,
   };
 }
 
@@ -168,7 +171,8 @@ export async function decideCandidateBatch(rows, triggerCandidateId) {
     };
   }
 
-  const system = [
+  const strat = activeStrategy();
+  const baseSystemParts = [
     'You are Charon, a Solana meme coin trench analyst.',
     'Return strict JSON only.',
     'You will receive up to 5 recently matched candidates.',
@@ -179,7 +183,9 @@ export async function decideCandidateBatch(rows, triggerCandidateId) {
     'Chart data is ATH/range context. Do not penalize or reward a token only because 24h change is huge; new Pump tokens often do that.',
     'Use distance from ATH/range high and top-blast risk to decide whether entry is late.',
     'Confidence is your conviction from 0 to 100, not probability.',
-  ].join(' ');
+  ];
+  if (strat?.llm_strategy_hint) baseSystemParts.push(strat.llm_strategy_hint);
+  const system = baseSystemParts.join(' ');
   const user = {
     task: 'Pick the best dry-run buy candidate from this recent batch, or choose none.',
     recent_lessons: activeLessonsForPrompt(),
