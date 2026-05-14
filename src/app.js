@@ -8,12 +8,15 @@ import { processCandidateFromSignals, maybeProcessDegenCandidate } from './pipel
 import { sendTelegram } from './telegram/send.js';
 import { makeFailureTracker } from './utils.js';
 import { canMonitorPositions } from './agentState.js';
+import { flush as flushBatch } from './db/batchWriter.js';
 
 setDefaultResultOrder('ipv4first');
 validateConfig();
 
 export async function startCharon() {
   initDb();
+  process.once('SIGINT', () => { flushBatch(); process.exit(0); });
+  process.once('SIGTERM', () => { flushBatch(); process.exit(0); });
   initLiveExecution();
   setupTelegram();
 

@@ -1,4 +1,5 @@
 import { now, json } from '../utils.js';
+import { queueWrite } from '../db/batchWriter.js';
 import { numSetting, boolSetting, strategyById } from '../db/settings.js';
 import { db } from '../db/connection.js';
 import { firstPositiveNumber, marketCapFromGmgn, tokenPriceFromGmgn } from '../utils.js';
@@ -106,6 +107,7 @@ export async function refreshCandidateForExecution(row) {
 }
 
 const sellInProgress = new Set();
+const _updateHighWater = db.prepare(`UPDATE dry_run_positions SET high_water_mcap = ?, high_water_price = ?, trailing_armed = ? WHERE id = ?`);
 
 function checkProfitLockExit(position, pnlPercent) {
   const strat = strategyById(position.strategy_id);
@@ -261,11 +263,9 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
   let finalPnlPercent = pnlPercent;
   let finalPnlSol = pnlSol;
 
-  db.prepare(`
-    UPDATE dry_run_positions
-    SET high_water_mcap = ?, high_water_price = ?, trailing_armed = ?
-    WHERE id = ?
-  `).run(highWaterMcap, highWaterPrice, trailingArmed ? 1 : 0, position.id);
+  const posId = position.id;
+  const armed = trailingArmed ? 1 : 0;
+  queueWrite(() => _updateHighWater.run(highWaterMcap, highWaterPrice, armed, posId));
 
   if (exitReason && autoExit && position.execution_mode === 'live') {
     if (sellInProgress.has(position.id)) return { ...position, exitReason: null };

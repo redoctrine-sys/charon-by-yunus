@@ -1,6 +1,7 @@
 import { db } from './connection.js';
 import { now, safeJson, json } from '../utils.js';
 import { numSetting } from './settings.js';
+import { queueWrite } from './batchWriter.js';
 
 export function candidateSignalKey(candidate, signature = null) {
   if (signature) return `${signature}:${candidate.token.mint}`;
@@ -45,16 +46,23 @@ export function upsertCandidate(candidate, signature) {
   })();
 }
 
+const _updateStatus = db.prepare('UPDATE candidates SET status = ?, updated_at_ms = ? WHERE id = ?');
+const _updateSnapshot = db.prepare(`
+  UPDATE candidates
+  SET status = COALESCE(?, status), updated_at_ms = ?, candidate_json = ?, filter_result_json = ?
+  WHERE id = ?
+`);
+
 export function updateCandidateStatus(candidateId, status) {
-  db.prepare('UPDATE candidates SET status = ?, updated_at_ms = ? WHERE id = ?').run(status, now(), candidateId);
+  const ts = now();
+  queueWrite(() => _updateStatus.run(status, ts, candidateId));
 }
 
 export function updateCandidateSnapshot(candidateId, candidate, status = null) {
-  db.prepare(`
-    UPDATE candidates
-    SET status = COALESCE(?, status), updated_at_ms = ?, candidate_json = ?, filter_result_json = ?
-    WHERE id = ?
-  `).run(status, now(), json(candidate), json(candidate.filters || {}), candidateId);
+  const ts = now();
+  const cJson = json(candidate);
+  const fJson = json(candidate.filters || {});
+  queueWrite(() => _updateSnapshot.run(status, ts, cJson, fJson, candidateId));
 }
 
 export function candidateById(id) {

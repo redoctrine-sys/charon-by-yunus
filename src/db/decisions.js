@@ -1,6 +1,7 @@
 import { db } from './connection.js';
 import { now, safeJson, json } from '../utils.js';
 import { numSetting } from './settings.js';
+import { queueWrite } from './batchWriter.js';
 
 export function storeDecision(candidateId, candidate, decision) {
   const result = db.prepare(`
@@ -50,6 +51,14 @@ export function batchById(batchId) {
   return { ...batch, rows };
 }
 
+const _insertDecisionLog = db.prepare(`
+  INSERT INTO decision_logs (
+    at_ms, batch_id, trigger_candidate_id, selected_candidate_id, selected_mint,
+    mode, action, verdict, confidence, reason, guardrails_json, token_json,
+    candidate_json, batch_json, execution_json, strategy_id
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`);
+
 export function logDecisionEvent({
   batchId = null,
   triggerCandidateId = null,
@@ -65,13 +74,7 @@ export function logDecisionEvent({
   const strategyId = selectedCandidate?.filters?.strategy
     || rows.find(row => row?.candidate?.filters?.strategy)?.candidate?.filters?.strategy
     || null;
-  db.prepare(`
-    INSERT INTO decision_logs (
-      at_ms, batch_id, trigger_candidate_id, selected_candidate_id, selected_mint,
-      mode, action, verdict, confidence, reason, guardrails_json, token_json,
-      candidate_json, batch_json, execution_json, strategy_id
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
+  const params = [
     now(),
     batchId,
     triggerCandidateId,
@@ -112,5 +115,6 @@ export function logDecisionEvent({
     })),
     json(execution),
     strategyId,
-  );
+  ];
+  queueWrite(() => _insertDecisionLog.run(...params));
 }

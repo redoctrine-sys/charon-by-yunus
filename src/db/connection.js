@@ -5,6 +5,12 @@ export const db = new Database(DB_PATH);
 
 export function initDb() {
   db.pragma('journal_mode = WAL');
+  db.pragma('synchronous = NORMAL');
+  db.pragma('cache_size = -32000');
+  db.pragma('temp_store = MEMORY');
+  db.pragma('mmap_size = 268435456');
+  db.pragma('wal_autocheckpoint = 1000');
+  db.pragma('busy_timeout = 5000');
   db.exec(`
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
@@ -515,3 +521,14 @@ export function ensureColumn(table, column, ddl) {
   const columns = db.prepare(`PRAGMA table_info(${table})`).all().map(row => row.name);
   if (!columns.includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
 }
+
+export function checkpoint() {
+  try { db.pragma('wal_checkpoint(PASSIVE)'); } catch { /* ignore */ }
+}
+
+// Periodic WAL checkpoint every 5 minutes to prevent unbounded WAL growth
+setInterval(checkpoint, 5 * 60 * 1000).unref();
+
+process.once('exit', () => { try { checkpoint(); db.close(); } catch { /* ignore */ } });
+process.once('SIGINT', () => { checkpoint(); process.exit(0); });
+process.once('SIGTERM', () => { checkpoint(); process.exit(0); });
